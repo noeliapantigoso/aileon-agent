@@ -1,0 +1,34 @@
+# Core
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+python-multipart>=0.0.6
+pydantic-settings>=2.0.0
+
+# Google Cloud
+google-cloud-firestore>=2.16.0
+google-cloud-storage>=2.14.0
+google-cloud-secret-manager>=2.20.0
+
+# Google Calendar
+google-api-python-client>=2.100.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
+
+# LLM
+google-genai>=1.0.0
+
+# Notion
+notion-client==2.2.0
+
+# Memory
+mem0ai>=0.1.0
+
+# Telegram
+python-telegram-bot>=21.0
+
+# HTTP client (usado por varios servicios)
+httpx>=0.25.0
+
+# TODO: Descomentar cuando se active ESP32 + voice + PWA auth
+# firebase-admin>=6.0.0
+# python-jose[cryptography]>=3.3.0

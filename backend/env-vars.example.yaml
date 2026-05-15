@@ -1,0 +1,22 @@
+# Copy this file to env-vars.yaml and fill values
+# Used by: gcloud run deploy --env-vars-file env-vars.yaml
+# DO NOT commit env-vars.yaml to git
+
+GEMINI_API_KEY: ""
+NOTION_TOKEN: ""
+TELEGRAM_BOT_TOKEN: ""
+TELEGRAM_ALLOWED_USER_ID: ""
+TELEGRAM_WEBHOOK_SECRET: ""
+TELEGRAM_WEBHOOK_URL: ""
+GCP_PROJECT_ID: ""
+FIRESTORE_COLLECTION_PREFIX: "assistant"
+NOTION_TASKS_DB: ""
+NOTION_NOTES_DB: ""
+NOTION_GOALS_DB: ""
+NOTION_DAILY_AGENDA_DB: ""
+USER_NAME: ""
+USER_TIMEZONE: "America/Lima"
+USER_ID: "user"
+PROACTIVE_SECRET: ""
+DEBUG: "false"
+LOG_LEVEL: "INFO"

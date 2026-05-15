@@ -1,0 +1,16 @@
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    env_file:
+      - ./backend/.env
+    environment:
+      - PORT=8080
+    volumes:
+      - ./backend/app:/app/app  # Hot reload en desarrollo
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
