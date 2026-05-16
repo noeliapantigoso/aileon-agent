@@ -29,11 +29,13 @@ class ToolExecutor:
         source: str = "text",
         experiments: ExperimentService | None = None,
         planner: Any = None,
+        calendar: Any = None,
     ) -> None:
         self.notion = notion
         self.memory = memory
         self.experiments = experiments
         self.planner = planner
+        self.calendar = calendar
         self._source = source
 
     async def execute(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -281,12 +283,29 @@ class ToolExecutor:
         active = self.experiments.list_active()
         return {"experiments": active, "count": len(active)}
 
+    # ── Calendar (read-only directo) ────────────────────────────────────────
+
+    async def _get_calendar_events(
+        self,
+        start_iso: str | None = None,
+        end_iso: str | None = None,
+        days: int = 1,
+    ) -> dict[str, Any]:
+        if self.calendar is None:
+            return {"error": "Calendar no disponible"}
+        from datetime import datetime as _dt
+        start = _dt.fromisoformat(start_iso) if start_iso else None
+        end = _dt.fromisoformat(end_iso) if end_iso else None
+        events = self.calendar.list_events(start=start, end=end, days=days)
+        return {"events": events, "count": len(events)}
+
     # ── Planner delegation ─────────────────────────────────────────────────
 
     async def _delegate_to_planner(
         self,
         action: str,
         target_date: str | None = None,
+        instruction: str | None = None,
     ) -> dict[str, Any]:
         if self.planner is None:
             return {"error": "Planner no disponible"}
@@ -296,6 +315,10 @@ class ToolExecutor:
             return await self.planner.verify_recent()
         if action == "daily_review":
             return await self.planner.daily_review(day_iso=target_date)
+        if action == "edit_request":
+            if not instruction:
+                return {"error": "edit_request requiere 'instruction'"}
+            return await self.planner.edit_request(instruction=instruction)
         return {"error": f"Acción desconocida: {action}"}
 
     # ── Dispatch map ─────────────────────────────────────────────────────────
@@ -317,6 +340,7 @@ class ToolExecutor:
         "close_experiment": _close_experiment,
         "list_active_experiments": _list_active_experiments,
         "delegate_to_planner": _delegate_to_planner,
+        "get_calendar_events": _get_calendar_events,
     }
 
 

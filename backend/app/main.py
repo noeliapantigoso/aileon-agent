@@ -121,6 +121,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             genai_client=insights_genai,
             collection_prefix=settings.firestore_collection_prefix,
             user_id=settings.user_id,
+            experiment_service=experiment_service,
+            notion_service=_notion_service,
         )
 
     # Memory Manager
@@ -169,6 +171,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         gcp_project_id=settings.gcp_project_id,
         experiment_service=experiment_service,
         planner=_planner_agent,
+        calendar_service=_calendar_service,
     )
 
     # Telegram Bot
@@ -183,6 +186,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global _proactive_service, _insight_service
     if insight_service_local is not None:
         insight_service_local.telegram = _telegram_bot
+        insight_service_local.memory = _memory_manager
+        insight_service_local.calendar = _calendar_service
         _insight_service = insight_service_local
 
         _proactive_service = ProactiveService(

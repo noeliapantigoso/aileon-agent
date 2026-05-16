@@ -51,6 +51,7 @@ class ProductivityAgent:
         gcp_project_id: str = "",
         experiment_service: Any = None,
         planner: Any = None,
+        calendar_service: Any = None,
     ) -> None:
         if gcp_project_id:
             self._client = genai.Client(
@@ -67,6 +68,7 @@ class ProductivityAgent:
         self._timezone = user_timezone
         self._experiments = experiment_service
         self._planner = planner
+        self._calendar = calendar_service
 
     async def process(
         self,
@@ -113,6 +115,7 @@ class ProductivityAgent:
             source=source,
             experiments=self._experiments,
             planner=self._planner,
+            calendar=self._calendar,
         )
         actions_taken: list[ActionTaken] = []
 
@@ -229,6 +232,7 @@ class ProductivityAgent:
             source=source,
             experiments=self._experiments,
             planner=self._planner,
+            calendar=self._calendar,
         )
 
         full_response = ""

@@ -382,25 +382,58 @@ TOOLS = [
         },
     },
     {
+        "name": "get_calendar_events",
+        "description": (
+            "Lista eventos del Google Calendar del usuario en un rango. "
+            "Usar para responder consultas tipo 'qué tengo mañana', 'qué tengo esta semana', "
+            "'a qué hora es mi reunión'. Read-only — no modifica nada."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "start_iso": {"type": "string", "description": "ISO datetime inicio (opcional, default ahora)"},
+                "end_iso": {"type": "string", "description": "ISO datetime fin (opcional)"},
+                "days": {"type": "integer", "description": "Si no hay start/end, días desde ahora. Default 1."},
+            },
+        },
+    },
+    {
         "name": "delegate_to_planner",
         "description": (
             "Delega al subagente PLANNER especializado en planificación de calendario. "
             "Usar cuando el usuario quiere: organizar su día/semana, planificar tiempos para metas, "
-            "verificar cumplimiento de bloques, hacer review del día. NO usar para crear "
-            "una sola tarea — usar create_task. El planner devuelve un resumen del plan/review "
-            "que debes presentar al usuario."
+            "verificar cumplimiento de bloques, hacer review del día, O crear/mover/borrar bloques "
+            "puntuales en Calendar (el planner valida coherencia con metas/peak hours antes de aplicar). "
+            "NO usar para crear una sola tarea Notion — usar create_task. "
+            "El planner devuelve un resumen del plan/review/edit que debes presentar al usuario."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["plan_day", "verify_recent", "daily_review"],
-                    "description": "plan_day=crear plan para mañana (o fecha dada), verify_recent=revisar cumplimiento de bloques pasados, daily_review=cierre del día",
+                    "enum": ["plan_day", "verify_recent", "daily_review", "edit_request"],
+                    "description": (
+                        "plan_day=crear plan para mañana (o fecha dada). "
+                        "verify_recent=revisar cumplimiento de bloques pasados. "
+                        "daily_review=cierre del día. "
+                        "edit_request=aplicar un cambio puntual al Calendar (crear/mover/borrar bloque) "
+                        "validando contra metas, peak hours y conflictos."
+                    ),
                 },
                 "target_date": {
                     "type": "string",
                     "description": "Para plan_day: fecha objetivo YYYY-MM-DD. Default mañana.",
+                },
+                "instruction": {
+                    "type": "string",
+                    "description": (
+                        "Para edit_request: texto natural del usuario describiendo el cambio. "
+                        "Ejemplos: 'agéndame 30min de gym mañana 7pm', "
+                        "'mueve mi bloque de lectura de las 7pm a las 10pm', "
+                        "'borra el bloque de lectura de hoy'. "
+                        "Pásalo tal cual te lo dio el usuario."
+                    ),
                 },
             },
             "required": ["action"],

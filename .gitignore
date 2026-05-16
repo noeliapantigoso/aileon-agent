@@ -10,6 +10,10 @@ oauth_client.json
 *.key
 credentials.json
 
+# Datos personales
+personality.json
+!personality.example.json
+
 # Python
 __pycache__/
 *.py[cod]

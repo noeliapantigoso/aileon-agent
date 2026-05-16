@@ -1,0 +1,47 @@
+{
+  "_comment": "Plantilla. Copia este archivo a personality.json y llena con tus datos. NO commitees personality.json (ya está en .gitignore).",
+  "personality": {
+    "enneagram": {
+      "type": null,
+      "name": "",
+      "subtype": null,
+      "core_drive": "",
+      "core_motivations": [],
+      "core_fears": [],
+      "characteristics": [],
+      "stress_patterns": {
+        "manifests_as": "",
+        "core_trigger": "",
+        "go_to_coping": [],
+        "healthy_coping": []
+      },
+      "growth_path": {
+        "core_work": "",
+        "practices": [],
+        "key_question": ""
+      },
+      "relationships": {
+        "strengths": [],
+        "challenges": [],
+        "tips": []
+      },
+      "work": {
+        "thrives_in": [],
+        "common_challenges": [],
+        "career_advice": []
+      },
+      "common_traps": []
+    },
+    "big5": null,
+    "mbti": null,
+    "other_tests": []
+  },
+  "current_struggles": [],
+  "proactive_messages": {
+    "daily_morning": true,
+    "daily_evening": true,
+    "silent_period_alerts": true,
+    "pattern_alerts": true,
+    "max_per_day": 3
+  }
+}

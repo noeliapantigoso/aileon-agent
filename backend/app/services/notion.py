@@ -134,6 +134,15 @@ class NotionService:
             logger.error("Notion get_tasks error: %s", exc)
             raise
 
+    async def get_task(self, task_id: str) -> dict[str, Any] | None:
+        """Lee una tarea por id (page id)."""
+        try:
+            page = await self.client.pages.retrieve(page_id=task_id)
+            return _simplify_task(page)
+        except APIResponseError as exc:
+            logger.warning("Notion get_task(%s) error: %s", task_id, exc)
+            return None
+
     async def update_task(self, task_id: str, **updates: Any) -> dict[str, Any]:
         """Actualiza propiedades de una tarea existente."""
         properties: dict[str, Any] = {}

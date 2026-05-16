@@ -243,6 +243,51 @@ VERIFY_PROMPT_TEMPLATE = """Eres planificador. Toca verificar bloques de plan qu
 Responde con resumen de qué hiciste."""
 
 
+EDIT_REQUEST_PROMPT_TEMPLATE = """Eres planificador. El usuario pide un cambio puntual al Calendar. \
+Tu trabajo es validar coherencia con sus metas, peak hours y patrones — luego aplicar (o proponer alternativa).
+
+# Petición del usuario (lenguaje natural)
+"{instruction}"
+
+# Hora actual
+{now_iso}
+
+# Perfil productividad
+{profile_summary}
+
+# Insights/patrones detectados
+{insights_summary}
+
+# Metas activas
+{goals_summary}
+
+# Experimentos activos
+{experiments_summary}
+
+# Eventos en Calendar próximos 7 días
+{upcoming_events}
+
+# Cumplimiento histórico (últimos 14 días)
+{completion_summary}
+
+# Reglas de decisión
+1. Parseá la intención: ¿crear / mover / borrar / consultar?
+2. Identifica entidades: bloque(s) afectado(s), fecha/hora, duración.
+3. Si hay event_id ambiguo, usá `list_calendar_events` para encontrarlo por título/fecha.
+4. VALIDAR antes de aplicar:
+   - ¿La hora propuesta cae en low_energy_hours y es deep work? → advertir y proponer peak hours
+   - ¿Choca con evento fijo existente? → proponer slot cercano libre con `find_free_slots`
+   - ¿Elimina único bloque dedicado a una meta activa? → advertir antes de borrar
+   - ¿Hora repetidamente con bajo cumplimiento histórico? → mencionar y sugerir alternativa
+5. Si validación OK, ejecutar con `create_block`/`update_block`/`delete_block`.
+6. Si hay conflicto, NO aplicar — devolver propuesta alternativa para que usuario decida.
+
+# Respuesta esperada
+Texto corto en español (2-4 frases) explicando qué hiciste o qué propones. \
+Si aplicaste, confirmá la acción. Si no, explicá el conflicto y la alternativa.
+Empezá ahora."""
+
+
 DAILY_REVIEW_PROMPT_TEMPLATE = """Eres planificador. Cierre del día — review.
 
 # Bloques del día
@@ -336,6 +381,34 @@ class PlannerAgent:
         )
         return await self._run_loop(prompt, mode="verify")
 
+    async def edit_request(self, instruction: str) -> dict[str, Any]:
+        """Aplica cambio puntual al Calendar validando coherencia."""
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        today = now.date()
+
+        ctx = await self._build_planning_context(today + timedelta(days=1))
+
+        upcoming = self._calendar.list_events(
+            start=now,
+            end=now + timedelta(days=7),
+            max_results=50,
+        )
+        completion = self._calendar.get_completion_history(days=14)
+
+        prompt = EDIT_REQUEST_PROMPT_TEMPLATE.format(
+            instruction=instruction,
+            now_iso=now.isoformat(),
+            profile_summary=ctx["profile_summary"],
+            insights_summary=ctx["insights_summary"],
+            goals_summary=ctx["goals_summary"],
+            experiments_summary=ctx["experiments_summary"],
+            upcoming_events=json.dumps(upcoming, ensure_ascii=False, indent=2)[:4000],
+            completion_summary=json.dumps(completion, ensure_ascii=False, indent=2)[:2000],
+        )
+
+        return await self._run_loop(prompt, mode="edit")
+
     async def daily_review(self, day_iso: str | None = None) -> dict[str, Any]:
         """Review del día. Default: hoy."""
         from datetime import timezone
@@ -361,13 +434,22 @@ class PlannerAgent:
         # Perfil
         profile = await self._memory._get_user_profile() if self._memory else {}
         productivity = profile.get("productivity", {}) if isinstance(profile, dict) else {}
+        cal = productivity.get("estimation_calibration", 1.0)
+        if cal > 1.05:
+            cal_note = f"⚠️ Calibración temporal: usuario subestima {int((cal - 1) * 100)}% — multiplica time_estimate × {cal}"
+        elif cal < 0.95:
+            cal_note = f"ℹ️ Calibración temporal: usuario sobreestima {int((1 - cal) * 100)}% — multiplica time_estimate × {cal}"
+        else:
+            cal_note = "Calibración temporal: estimaciones precisas (factor 1.0)"
+
         profile_summary = (
             f"Nombre: {profile.get('name', 'usuario')}\n"
             f"Ocupación: {profile.get('occupation', '')}\n"
             f"Peak hours: {productivity.get('peak_hours', '')}\n"
             f"Low energy: {productivity.get('low_energy_hours', '')}\n"
             f"Work start/end: {productivity.get('work_start', '')} - {productivity.get('work_end', '')}\n"
-            f"Focus block preferido: {productivity.get('preferred_focus_block_minutes', 90)}min"
+            f"Focus block preferido: {productivity.get('preferred_focus_block_minutes', 90)}min\n"
+            f"{cal_note}"
         )
 
         # Personalidad
