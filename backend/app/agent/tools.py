@@ -268,10 +268,54 @@ TOOLS = [
         },
     },
     {
+        "name": "update_goal",
+        "description": (
+            "Edita campos de una meta (título, tipo, área, fecha objetivo, KRs, status). "
+            "NO usar para reportar progreso — usar update_goal_progress. "
+            "Si el usuario no dio el goal_id, primero llamá get_goals para encontrarlo."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "goal_id": {"type": "string", "description": "ID de la meta en Notion"},
+                "title": {"type": "string", "description": "Nuevo título"},
+                "goal_type": {
+                    "type": "string",
+                    "enum": ["short_term", "medium_term", "long_term"],
+                },
+                "area": {
+                    "type": "string",
+                    "enum": ["work", "personal", "health", "finance", "learning", "relationships"],
+                },
+                "target_date": {"type": "string", "description": "YYYY-MM-DD"},
+                "key_results": {"type": "string"},
+                "status": {
+                    "type": "string",
+                    "enum": ["active", "completed", "paused", "abandoned"],
+                },
+            },
+            "required": ["goal_id"],
+        },
+    },
+    {
+        "name": "archive_goal",
+        "description": (
+            "Archiva (soft-delete) una meta. Usar cuando el usuario quiere "
+            "borrar o eliminar una meta. CONFIRMAR con el usuario antes de archivar."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "goal_id": {"type": "string", "description": "ID de la meta en Notion"},
+            },
+            "required": ["goal_id"],
+        },
+    },
+    {
         "name": "update_goal_progress",
         "description": (
-            "Actualiza el progreso de una meta. Usar cuando el usuario "
-            "reporta avances en una meta."
+            "Actualiza SOLO el progreso (%) y agrega nota de avance. "
+            "Para cambiar título/fecha/área usar update_goal."
         ),
         "parameters": {
             "type": "object",

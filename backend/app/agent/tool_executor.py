@@ -59,7 +59,7 @@ class ToolExecutor:
         try:
             result = await handler(self, **args)
             # Invalidar cache de trabajo después de operaciones de escritura
-            if tool_name in ("create_task", "update_task", "save_daily_plan", "create_goal", "update_goal_progress"):
+            if tool_name in ("create_task", "update_task", "save_daily_plan", "create_goal", "update_goal_progress", "update_goal", "archive_goal"):
                 self.memory.invalidate_work_context_cache()
             return result
         except Exception as exc:
@@ -224,6 +224,31 @@ class ToolExecutor:
         )
         return {"status": "updated", "goal": result}
 
+    async def _update_goal(
+        self,
+        goal_id: str,
+        title: str | None = None,
+        goal_type: str | None = None,
+        area: str | None = None,
+        target_date: str | None = None,
+        key_results: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        result = await self.notion.update_goal(
+            goal_id=goal_id,
+            title=title,
+            goal_type=goal_type,
+            area=area,
+            target_date=target_date,
+            key_results=key_results,
+            status=status,
+        )
+        return {"status": "updated", "goal": result}
+
+    async def _archive_goal(self, goal_id: str) -> dict[str, Any]:
+        result = await self.notion.archive_goal(goal_id)
+        return {"status": "archived", "goal": result}
+
     async def _get_user_profile(self) -> dict[str, Any]:
         context = await self.memory.get_full_context("")
         return {"profile": context.get("user_profile", {})}
@@ -334,6 +359,8 @@ class ToolExecutor:
         "create_goal": _create_goal,
         "get_goals": _get_goals,
         "update_goal_progress": _update_goal_progress,
+        "update_goal": _update_goal,
+        "archive_goal": _archive_goal,
         "get_user_profile": _get_user_profile,
         "start_experiment": _start_experiment,
         "log_experiment_progress": _log_experiment_progress,

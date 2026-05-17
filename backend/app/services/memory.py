@@ -256,8 +256,9 @@ class MemoryManager:
         try:
             results = self.mem0.search(
                 query=query,
-                user_id=self._user_id,
+                filters={"user_id": self._user_id},
                 limit=MAX_RELEVANT_MEMORIES,
+                version="v2",
             )
             memories = []
             if isinstance(results, dict) and "results" in results:

@@ -435,6 +435,69 @@ class NotionService:
             logger.error("Notion get_goals error: %s", exc)
             raise
 
+    async def update_goal(
+        self,
+        goal_id: str,
+        title: Optional[str] = None,
+        goal_type: Optional[str] = None,
+        area: Optional[str] = None,
+        target_date: Optional[str] = None,
+        key_results: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Edita campos editables de una meta (NO progreso — usar update_goal_progress)."""
+        type_map = {
+            "short_term": "Short Term",
+            "medium_term": "Medium Term",
+            "long_term": "Long Term",
+        }
+        area_map = {
+            "work": "Work",
+            "personal": "Personal",
+            "health": "Health",
+            "finance": "Finance",
+            "learning": "Learning",
+            "relationships": "Relationships",
+        }
+
+        properties: dict[str, Any] = {}
+        if title is not None:
+            properties["Name"] = {"title": [{"text": {"content": title}}]}
+        if goal_type is not None:
+            properties["Type"] = {"select": {"name": type_map.get(goal_type.lower(), goal_type)}}
+        if area is not None:
+            properties["Area"] = {"select": {"name": area_map.get(area.lower(), area.title())}}
+        if target_date is not None:
+            properties["Target Date"] = {"date": {"start": target_date}}
+        if key_results is not None:
+            properties["Key Results"] = {
+                "rich_text": [{"type": "text", "text": {"content": key_results[:1900]}}]
+            }
+        if status is not None:
+            properties["Status"] = {"select": {"name": status.title()}}
+
+        if not properties:
+            return {"id": goal_id, "updated": False, "reason": "sin campos a actualizar"}
+
+        try:
+            page = await self.client.pages.update(
+                page_id=goal_id,
+                properties=properties,
+            )
+            return _simplify_goal(page)
+        except APIResponseError as exc:
+            logger.error("Notion update_goal error: %s", exc)
+            raise
+
+    async def archive_goal(self, goal_id: str) -> dict[str, Any]:
+        """Archiva (soft-delete) una meta."""
+        try:
+            await self.client.pages.update(page_id=goal_id, archived=True)
+            return {"id": goal_id, "archived": True}
+        except APIResponseError as exc:
+            logger.error("Notion archive_goal error: %s", exc)
+            raise
+
     async def update_goal_progress(
         self,
         goal_id: str,
