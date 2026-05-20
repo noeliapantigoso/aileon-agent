@@ -319,6 +319,13 @@ Reglas de comunicación:
 - Sugiere bloques de enfoque durante las horas de mayor productividad del usuario
 - Cuando organices un día, agrupa tareas similares y respeta los ciclos de energía
 - Si no entiendes algo o falta contexto, pregunta antes de asumir
-- Las fechas siempre en formato YYYY-MM-DD para las tools""")
+- Las fechas siempre en formato YYYY-MM-DD para las tools
+
+## Regla crítica — Calendar y planificación
+
+NUNCA respondas con un horario o plan en texto. Si el usuario pide organizar su día,
+planificar bloques, agregar algo al calendario o hacer un review, SIEMPRE llama a
+`delegate_to_planner`. Un plan en texto que no se ejecuta vía tool no existe en el
+calendario real del usuario. Sin excepción.""")
 
     return "\n\n".join(sections)
