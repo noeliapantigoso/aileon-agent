@@ -174,6 +174,10 @@ PLAN_DAY_PROMPT_TEMPLATE = """Eres un planificador experto en gestión del tiemp
 realista para el día especificado en el Google Calendar del usuario, respetando \
 metas, experimentos activos, tareas pendientes, energía y eventos fijos ya existentes.
 
+IMPORTANTE: Todos los datetimes que generes deben estar en hora Lima (America/Lima, UTC-5).
+Usa siempre el formato ISO con offset explícito: 2024-05-20T09:00:00-05:00
+NUNCA uses el sufijo Z ni UTC para los bloques que crees.
+
 # Día a planificar
 {target_date} ({day_name})
 
@@ -246,10 +250,14 @@ Responde con resumen de qué hiciste."""
 EDIT_REQUEST_PROMPT_TEMPLATE = """Eres planificador. El usuario pide un cambio puntual al Calendar. \
 Tu trabajo es validar coherencia con sus metas, peak hours y patrones — luego aplicar (o proponer alternativa).
 
+IMPORTANTE: Todos los datetimes que generes deben estar en hora Lima (America/Lima, UTC-5).
+Usa siempre el formato ISO con offset explícito: 2024-05-20T09:00:00-05:00
+NUNCA uses el sufijo Z ni UTC para los bloques que crees o muevas.
+
 # Petición del usuario (lenguaje natural)
 "{instruction}"
 
-# Hora actual
+# Hora actual (Lima, UTC-5)
 {now_iso}
 
 # Perfil productividad
@@ -296,13 +304,16 @@ DAILY_REVIEW_PROMPT_TEMPLATE = """Eres planificador. Cierre del día — review.
 # Estadísticas
 {stats}
 
+# Respuesta del usuario sobre qué completó
+{user_input}
+
 # Tu trabajo
-1. Para bloques sin verificar todavía, llamar `mark_block_completed`
-   (en su mayoría asumir cumplidos a menos que el usuario haya dicho lo contrario en chat)
-2. Para experiments asociados a bloques cumplidos, avanzar progreso
-3. Para goals asociadas a bloques cumplidos, calcular nuevo % y `update_goal_progress`
-4. Generar review breve para el usuario: qué cumplió, qué quedó pendiente,
-   patrón observado del día (si aplica)
+1. Basándote ÚNICAMENTE en la respuesta del usuario de arriba, determinar qué bloques se cumplieron.
+   — NUNCA marques un bloque como cumplido si el usuario no lo mencionó explícitamente.
+   — Si el usuario no mencionó un bloque, marcarlo con completed="false".
+2. Llamar `mark_block_completed` para cada bloque según lo que dijo el usuario.
+3. Para experiments/goals: solo avanzar progreso si el bloque fue confirmado por el usuario.
+4. Generar review breve: qué cumplió (según el usuario), qué quedó pendiente, patrón del día si aplica.
 
 Responde con el review final que ve el usuario."""
 
@@ -362,12 +373,21 @@ class PlannerAgent:
 
         return await self._run_loop(prompt, mode="plan")
 
+    def _now_lima(self) -> datetime:
+        """Hora actual en Lima (UTC-5)."""
+        try:
+            from zoneinfo import ZoneInfo
+            return datetime.now(ZoneInfo(self._timezone))
+        except Exception:
+            from datetime import timezone as _tz, timedelta as _td
+            return datetime.now(_tz(_td(hours=-5)))
+
     async def verify_recent(self) -> dict[str, Any]:
         """Verifica bloques pasados en últimas ~3h."""
         from datetime import timezone
-        now = datetime.now(timezone.utc)
-        start = now - timedelta(hours=3)
-        events = self._calendar.list_events(start=start, end=now)
+        now_utc = datetime.now(timezone.utc)
+        start = now_utc - timedelta(hours=3)
+        events = self._calendar.list_events(start=start, end=now_utc)
         plan_events = [
             e for e in events
             if "[plan]" in (e.get("summary") or "")
@@ -375,8 +395,9 @@ class PlannerAgent:
         if not plan_events:
             return {"ok": True, "verified": 0, "reason": "no plan events in window"}
 
+        now_lima = self._now_lima()
         prompt = VERIFY_PROMPT_TEMPLATE.format(
-            now_iso=now.isoformat(),
+            now_iso=now_lima.isoformat(),
             recent_blocks=json.dumps(plan_events, ensure_ascii=False, indent=2),
         )
         return await self._run_loop(prompt, mode="verify")
@@ -384,21 +405,22 @@ class PlannerAgent:
     async def edit_request(self, instruction: str) -> dict[str, Any]:
         """Aplica cambio puntual al Calendar validando coherencia."""
         from datetime import timezone
-        now = datetime.now(timezone.utc)
-        today = now.date()
+        now_utc = datetime.now(timezone.utc)
+        now_lima = self._now_lima()
+        today = now_lima.date()
 
         ctx = await self._build_planning_context(today + timedelta(days=1))
 
         upcoming = self._calendar.list_events(
-            start=now,
-            end=now + timedelta(days=7),
+            start=now_utc,
+            end=now_utc + timedelta(days=7),
             max_results=50,
         )
         completion = self._calendar.get_completion_history(days=14)
 
         prompt = EDIT_REQUEST_PROMPT_TEMPLATE.format(
             instruction=instruction,
-            now_iso=now.isoformat(),
+            now_iso=now_lima.isoformat(),
             profile_summary=ctx["profile_summary"],
             insights_summary=ctx["insights_summary"],
             goals_summary=ctx["goals_summary"],
@@ -409,7 +431,7 @@ class PlannerAgent:
 
         return await self._run_loop(prompt, mode="edit")
 
-    async def daily_review(self, day_iso: str | None = None) -> dict[str, Any]:
+    async def daily_review(self, day_iso: str | None = None, user_input: str = "") -> dict[str, Any]:
         """Review del día. Default: hoy."""
         from datetime import timezone
         day = date.fromisoformat(day_iso) if day_iso else date.today()
@@ -420,9 +442,12 @@ class PlannerAgent:
         plan_events = [e for e in events if "[plan]" in (e.get("summary") or "")]
         stats = self._calendar.get_completion_history(days=1)
 
+        user_input_text = user_input.strip() if user_input.strip() else "(el usuario no respondió — asumir todo no cumplido)"
+
         prompt = DAILY_REVIEW_PROMPT_TEMPLATE.format(
             today_blocks=json.dumps(plan_events, ensure_ascii=False, indent=2),
             stats=json.dumps(stats, ensure_ascii=False, indent=2),
+            user_input=user_input_text,
         )
         return await self._run_loop(prompt, mode="review")
 
@@ -620,12 +645,20 @@ class PlannerAgent:
                 return self._calendar.delete_event(args["event_id"])
 
             if name == "mark_block_completed":
+                completed_val = args.get("completed", "true")
                 ev = self._calendar.mark_event_completed(
                     event_id=args["event_id"],
-                    completed=args.get("completed", "true"),
+                    completed=completed_val,
                     note=args.get("note"),
                 )
-                return {"marked": ev}
+                task_id = (ev or {}).get("task_id")
+                notion_update = None
+                if task_id:
+                    if completed_val == "true":
+                        notion_update = await self._notion.update_task(task_id, status="done")
+                    elif completed_val == "partial":
+                        notion_update = await self._notion.update_task(task_id, status="in progress")
+                return {"marked": ev, "notion_updated": notion_update}
 
             if name == "get_completion_history":
                 return self._calendar.get_completion_history(days=args.get("days", 14))

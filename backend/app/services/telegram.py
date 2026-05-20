@@ -24,6 +24,34 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_TELEGRAM_LIMIT = 4096
+
+
+def _split_message(text: str, limit: int = _TELEGRAM_LIMIT) -> list[str]:
+    """Divide texto en chunks respetando párrafos y el límite de Telegram."""
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+
+        # Buscar el último salto de línea dentro del límite
+        cut = text.rfind("\n", 0, limit)
+        if cut <= 0:
+            # No hay salto de línea: cortar en el último espacio
+            cut = text.rfind(" ", 0, limit)
+        if cut <= 0:
+            # Sin espacio tampoco: corte duro
+            cut = limit
+
+        chunks.append(text[:cut].rstrip())
+        text = text[cut:].lstrip()
+
+    return chunks
+
 
 class TelegramBot:
     """Bot de Telegram que recibe texto y lo procesa con el agente."""
@@ -217,11 +245,7 @@ class TelegramBot:
                 reply += f"\n\n📋 _{actions_summary}_"
 
             # Telegram tiene límite de 4096 chars por mensaje
-            chunks = (
-                [reply[i:i + 4096] for i in range(0, len(reply), 4096)]
-                if len(reply) > 4096
-                else [reply]
-            )
+            chunks = _split_message(reply)
             for chunk in chunks:
                 try:
                     await update.message.reply_text(chunk, parse_mode="Markdown")
@@ -229,7 +253,10 @@ class TelegramBot:
                     logger.warning(
                         "Markdown parse failed, retrying plain: %s", md_exc
                     )
-                    await update.message.reply_text(chunk)
+                    try:
+                        await update.message.reply_text(chunk)
+                    except Exception as plain_exc:
+                        logger.error("Failed to send chunk: %s", plain_exc)
 
         except Exception as exc:
             logger.error("Error processing Telegram message: %s", exc)

@@ -339,7 +339,7 @@ class ToolExecutor:
         if action == "verify_recent":
             return await self.planner.verify_recent()
         if action == "daily_review":
-            return await self.planner.daily_review(day_iso=target_date)
+            return await self.planner.daily_review(day_iso=target_date, user_input=instruction or "")
         if action == "edit_request":
             if not instruction:
                 return {"error": "edit_request requiere 'instruction'"}

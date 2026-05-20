@@ -340,17 +340,38 @@ async def planner_verify(
 async def planner_daily_review(
     x_proactive_secret: str = Header(default=""),
 ) -> dict:
-    """Llamado por Cloud Scheduler 22pm Lima. Review del día."""
+    """Llamado por Cloud Scheduler 22pm Lima. Pregunta al usuario qué bloques completó."""
     settings = get_settings()
     if not settings.proactive_secret or x_proactive_secret != settings.proactive_secret:
         raise HTTPException(status_code=403, detail="Invalid secret")
-    if _planner_agent is None:
-        return {"ok": False, "reason": "planner not initialized"}
-    result = await _planner_agent.daily_review()
-    if _telegram_bot is not None:
-        summary = result.get("summary", "")[:1500]
-        await _telegram_bot.send_proactive_message(f"🌙 *Review del día*\n\n{summary}")
-    return {"ok": True, **result}
+    if _telegram_bot is None:
+        return {"ok": False, "reason": "telegram not initialized"}
+
+    # Listar bloques del día para incluirlos en la pregunta
+    blocks_text = ""
+    if _calendar_service is not None:
+        try:
+            from zoneinfo import ZoneInfo
+            from datetime import timezone as _tz
+            tz = ZoneInfo(settings.user_timezone)
+            today_local = datetime.now(tz).date()
+            day_start = datetime.combine(today_local, datetime.min.time()).replace(tzinfo=_tz.utc)
+            day_end = day_start + __import__("datetime").timedelta(days=1)
+            events = _calendar_service.list_events(start=day_start, end=day_end)
+            plan_events = [e for e in events if "[plan]" in (e.get("summary") or "")]
+            if plan_events:
+                lines = [f"- {e.get('summary', '?').replace('[plan] ', '')}" for e in plan_events]
+                blocks_text = "\n" + "\n".join(lines)
+        except Exception as exc:
+            logger.warning("daily-review: could not fetch blocks: %s", exc)
+
+    question = (
+        f"🌙 *Review del día*\n\n"
+        f"¿Cuáles de estos bloques completaste hoy?{blocks_text}\n\n"
+        f"Respondeme y genero el resumen."
+    )
+    await _telegram_bot.send_proactive_message(question)
+    return {"ok": True, "asked": True}
 
 
 @app.post("/api/v1/telegram/webhook")

@@ -473,9 +473,10 @@ TOOLS = [
                     "type": "string",
                     "description": (
                         "Para edit_request: texto natural del usuario describiendo el cambio. "
-                        "Ejemplos: 'agéndame 30min de gym mañana 7pm', "
-                        "'mueve mi bloque de lectura de las 7pm a las 10pm', "
-                        "'borra el bloque de lectura de hoy'. "
+                        "Para daily_review: respuesta del usuario indicando qué bloques completó "
+                        "(pasar el mensaje del usuario tal cual). "
+                        "Ejemplos edit_request: 'agéndame 30min de gym mañana 7pm', "
+                        "'mueve mi bloque de lectura de las 7pm a las 10pm'. "
                         "Pásalo tal cual te lo dio el usuario."
                     ),
                 },
