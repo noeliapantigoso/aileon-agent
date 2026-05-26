@@ -187,19 +187,19 @@ class ProactiveService:
         ttype = trigger["type"]
         context = self._build_trigger_context(trigger)
 
-        prompt = f"""Genera un mensaje breve (1-3 líneas) de Telegram para el usuario \
-de un asistente de productividad. Tono: directo, empático, sin emojis excesivos, en español, tutea.
+        prompt = f"""Generate a short Telegram message (1-3 lines) for the user \
+of a productivity assistant. Tone: direct, empathetic, minimal emojis, in English.
 
-Tipo de trigger: {ttype}
-Contexto: {context}
+Trigger type: {ttype}
+Context: {context}
 
-Reglas:
-- NO uses saludos genéricos tipo "Hola!"
-- Va directo al punto del trigger
-- Termina con una pregunta accionable cuando aplique
-- Markdown ok pero mínimo
+Rules:
+- NO generic greetings like "Hey!" or "Hello!"
+- Go straight to the point of the trigger
+- End with an actionable question when applicable
+- Markdown ok but minimal
 
-Mensaje:"""
+Message:"""
 
         try:
             response = self.genai.models.generate_content(
@@ -216,34 +216,34 @@ Mensaje:"""
         if ttype == "experiment_check_in":
             exp = trigger["experiment"]
             return (
-                f"Experimento '{exp.get('name')}' (hipótesis: {exp.get('hypothesis')}). "
-                f"Lleva {len(exp.get('history', []))} check-ins. Toca preguntar cómo va."
+                f"Experiment '{exp.get('name')}' (hypothesis: {exp.get('hypothesis')}). "
+                f"Has {len(exp.get('history', []))} check-ins so far. Time to ask how it's going."
             )
         if ttype == "silent_period":
-            return f"El usuario no ha hablado en {trigger['days']} días. Chequeo amable."
+            return f"User hasn't messaged in {trigger['days']} days. Friendly check-in."
         if ttype == "daily_morning":
-            return "Inicio del día. Preguntar qué prioriza hoy."
+            return "Start of day. Ask what they're prioritizing today."
         if ttype == "daily_evening":
-            return "Fin del día. Pedir reflexión: qué logró, qué quedó pendiente."
+            return "End of day. Ask for reflection: what did they accomplish, what's still pending."
         if ttype == "overdue_tasks":
             titles = [t.get("title", "?") for t in trigger["tasks"]]
-            return f"Tareas vencidas sin marcar: {', '.join(titles[:3])}"
+            return f"Overdue tasks not marked done: {', '.join(titles[:3])}"
         return ""
 
     def _fallback_message(self, trigger: dict[str, Any]) -> str:
         ttype = trigger["type"]
         if ttype == "experiment_check_in":
             exp = trigger["experiment"]
-            return f"Toca check-in de tu experimento *{exp.get('name')}*. ¿Cómo te fue?"
+            return f"Time for a check-in on your *{exp.get('name')}* experiment. How's it going?"
         if ttype == "silent_period":
-            return f"No hablamos hace {trigger['days']} días. ¿Todo bien?"
+            return f"We haven't talked in {trigger['days']} days. Everything okay?"
         if ttype == "daily_morning":
-            return "Buen día. ¿Qué prioriza hoy?"
+            return "Morning. What are you prioritizing today?"
         if ttype == "daily_evening":
-            return "¿Cómo te fue hoy? Cerremos el día."
+            return "How did today go? Let's close out the day."
         if ttype == "overdue_tasks":
             count = len(trigger["tasks"])
-            return f"Tenés {count} tareas vencidas. ¿Las reprogramamos o las cerramos?"
+            return f"You have {count} overdue tasks. Want to reschedule or close them?"
         return ""
 
     # ── Post-send bookkeeping ───────────────────────────────────────────────

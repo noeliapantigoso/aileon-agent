@@ -170,152 +170,151 @@ PLANNER_TOOLS = [
 
 # ── Prompts ─────────────────────────────────────────────────────────────────
 
-PLAN_DAY_PROMPT_TEMPLATE = """Eres un planificador experto en gestión del tiempo. Tu rol: generar un plan \
-realista para el día especificado en el Google Calendar del usuario, respetando \
-metas, experimentos activos, tareas pendientes, energía y eventos fijos ya existentes.
+PLAN_DAY_PROMPT_TEMPLATE = """You are an expert time management planner. Your role: generate a realistic \
+plan for the specified day in the user's Google Calendar, respecting goals, active experiments, \
+pending tasks, energy levels, and existing fixed events.
 
-IMPORTANTE: Todos los datetimes que generes deben estar en hora Lima (America/Lima, UTC-5).
-Usa siempre el formato ISO con offset explícito: 2024-05-20T09:00:00-05:00
-NUNCA uses el sufijo Z ni UTC para los bloques que crees.
+IMPORTANT: All datetimes you generate must be in Lima time (America/Lima, UTC-5).
+Always use ISO format with explicit offset: 2024-05-20T09:00:00-05:00
+NEVER use the Z suffix or UTC for blocks you create.
 
-# Día a planificar
+# Day to plan
 {target_date} ({day_name})
 
-# Perfil del usuario
+# User profile
 {user_profile_summary}
 
-# Personalidad
+# Personality
 {personality_summary}
 
-# Insights/patrones detectados
+# Detected insights/patterns
 {insights_summary}
 
-# Cumplimiento histórico
+# Completion history
 {completion_summary}
 
-# Metas activas
+# Active goals
 {goals_summary}
 
-# Experimentos activos
+# Active experiments
 {experiments_summary}
 
-# Tareas pendientes Notion
+# Pending Notion tasks
 {pending_tasks_summary}
 
-# Eventos fijos ya en Calendar
+# Fixed events already in Calendar
 {fixed_events_summary}
 
-# Reglas de planificación
-1. Deep work (alto enfoque) → solo en peak hours del perfil
-2. Tareas operativas / repetitivas → low energy hours
-3. Cada experimento activo necesita su slot diario o según check_in_every_days
-4. Para cada meta corto plazo: calcular horas restantes hasta target_date
-   y distribuir proporcionalmente
-5. Buffer 10-15min entre bloques
-6. NO sobreescribir eventos fijos existentes (meetings, etc.)
-7. Bloques 30-90min — no más de 2h continuas
-8. Almuerzo / breaks NO opcionales
-9. Si suma horas requeridas > horas disponibles → flag al final del plan
-10. Para tu cumplimiento histórico: NO agendes deep work en horas con <40% cumplimiento
+# Planning rules
+1. Deep work (high focus) → only during profile peak hours
+2. Operational / repetitive tasks → low energy hours
+3. Each active experiment needs its daily slot or per check_in_every_days
+4. For each short-term goal: calculate remaining hours until target_date and distribute proportionally
+5. 10-15min buffer between blocks
+6. DO NOT overwrite existing fixed events (meetings, etc.)
+7. Blocks 30-90min — no more than 2h continuous
+8. Lunch / breaks NOT optional
+9. If required hours > available hours → flag at end of plan
+10. Based on completion history: DO NOT schedule deep work at hours with <40% completion rate
 
-# Tu trabajo
-1. Llama `get_completion_history` para ver patrones reales si necesario
-2. Llama `list_calendar_events` para confirmar slots libres del día
-3. Para cada bloque generá `create_block` con su asociación goal_id/experiment_id/task_id
-4. Al final responde con resumen breve del plan + advertencias si hay sobre-asignación
+# Your job
+1. Call `get_completion_history` to check real patterns if needed
+2. Call `list_calendar_events` to confirm free slots for the day
+3. For each block call `create_block` with its goal_id/experiment_id/task_id association
+4. At the end reply with a brief plan summary + warnings if over-allocated
 
-Acción: planifica el día. Empieza ahora."""
+Action: plan the day. Start now."""
 
 
-VERIFY_PROMPT_TEMPLATE = """Eres planificador. Toca verificar bloques de plan que ya pasaron.
+VERIFY_PROMPT_TEMPLATE = """You are a planner. Time to verify plan blocks that have already passed.
 
-# Hora actual
+# Current time
 {now_iso}
 
-# Bloques de plan que pasaron en las últimas 3h
+# Plan blocks that passed in the last 3h
 {recent_blocks}
 
-# Reglas
-1. Para cada bloque NO marcado:
-   - Si está asociado a un experiment_id, llamar `log_experiment_progress`
-     con did_it=true asumiendo cumplido (luego usuario corrige si fue falso)
-   - Marcar el bloque con `mark_block_completed` status "true"
-2. Para cada bloque marcado "false":
-   - Buscar slot libre en próximas 24h y crear nuevo bloque equivalente
-3. Si hay 2+ "false" del mismo experimento en últimos 3 días, flaggear
+# Rules
+1. For each UNMARKED block:
+   - If associated with an experiment_id, call `log_experiment_progress` with did_it=true
+     assuming completed (user can correct later if false)
+   - Mark the block with `mark_block_completed` status "true"
+2. For each block marked "false":
+   - Find a free slot in the next 24h and create an equivalent new block
+3. If 2+ "false" for the same experiment in the last 3 days, flag it
 
-Responde con resumen de qué hiciste."""
+Reply with a summary of what you did."""
 
 
-EDIT_REQUEST_PROMPT_TEMPLATE = """Eres planificador. El usuario pide un cambio puntual al Calendar. \
-Tu trabajo es validar coherencia con sus metas, peak hours y patrones — luego aplicar (o proponer alternativa).
+EDIT_REQUEST_PROMPT_TEMPLATE = """You are a planner. The user is requesting a specific change to their Calendar. \
+Your job is to validate coherence with their goals, peak hours, and patterns — then apply (or propose an alternative).
 
-IMPORTANTE: Todos los datetimes que generes deben estar en hora Lima (America/Lima, UTC-5).
-Usa siempre el formato ISO con offset explícito: 2024-05-20T09:00:00-05:00
-NUNCA uses el sufijo Z ni UTC para los bloques que crees o muevas.
+IMPORTANT: All datetimes you generate must be in Lima time (America/Lima, UTC-5).
+Always use ISO format with explicit offset: 2024-05-20T09:00:00-05:00
+NEVER use the Z suffix or UTC for blocks you create or move.
 
-# Petición del usuario (lenguaje natural)
+# User request (natural language)
 "{instruction}"
 
-# Hora actual (Lima, UTC-5)
+# Current time (Lima, UTC-5)
 {now_iso}
 
-# Perfil productividad
+# Productivity profile
 {profile_summary}
 
-# Insights/patrones detectados
+# Detected insights/patterns
 {insights_summary}
 
-# Metas activas
+# Active goals
 {goals_summary}
 
-# Experimentos activos
+# Active experiments
 {experiments_summary}
 
-# Eventos en Calendar próximos 7 días
+# Calendar events next 7 days
 {upcoming_events}
 
-# Cumplimiento histórico (últimos 14 días)
+# Completion history (last 14 days)
 {completion_summary}
 
-# Reglas de decisión
-1. Parseá la intención: ¿crear / mover / borrar / consultar?
-2. Identifica entidades: bloque(s) afectado(s), fecha/hora, duración.
-3. Si hay event_id ambiguo, usá `list_calendar_events` para encontrarlo por título/fecha.
-4. VALIDAR antes de aplicar:
-   - ¿La hora propuesta cae en low_energy_hours y es deep work? → advertir y proponer peak hours
-   - ¿Choca con evento fijo existente? → proponer slot cercano libre con `find_free_slots`
-   - ¿Elimina único bloque dedicado a una meta activa? → advertir antes de borrar
-   - ¿Hora repetidamente con bajo cumplimiento histórico? → mencionar y sugerir alternativa
-5. Si validación OK, ejecutar con `create_block`/`update_block`/`delete_block`.
-6. Si hay conflicto, NO aplicar — devolver propuesta alternativa para que usuario decida.
+# Decision rules
+1. Parse the intent: create / move / delete / query?
+2. Identify entities: affected block(s), date/time, duration.
+3. If event_id is ambiguous, use `list_calendar_events` to find it by title/date.
+4. VALIDATE before applying:
+   - Does the proposed time fall in low_energy_hours and is it deep work? → warn and suggest peak hours
+   - Does it conflict with an existing fixed event? → suggest nearby free slot with `find_free_slots`
+   - Does it remove the only block dedicated to an active goal? → warn before deleting
+   - Is that time repeatedly low in completion history? → mention and suggest alternative
+5. If validation OK, execute with `create_block`/`update_block`/`delete_block`.
+6. If there's a conflict, DO NOT apply — return an alternative proposal for the user to decide.
 
-# Respuesta esperada
-Texto corto en español (2-4 frases) explicando qué hiciste o qué propones. \
-Si aplicaste, confirmá la acción. Si no, explicá el conflicto y la alternativa.
-Empezá ahora."""
+# Expected response
+Short text (2-4 sentences) explaining what you did or propose. \
+If applied, confirm the action. If not, explain the conflict and the alternative.
+Start now."""
 
 
-DAILY_REVIEW_PROMPT_TEMPLATE = """Eres planificador. Cierre del día — review.
+DAILY_REVIEW_PROMPT_TEMPLATE = """You are a planner. End of day — daily review.
 
-# Bloques del día
+# Today's blocks
 {today_blocks}
 
-# Estadísticas
+# Stats
 {stats}
 
-# Respuesta del usuario sobre qué completó
+# User's response about what they completed
 {user_input}
 
-# Tu trabajo
-1. Basándote ÚNICAMENTE en la respuesta del usuario de arriba, determinar qué bloques se cumplieron.
-   — NUNCA marques un bloque como cumplido si el usuario no lo mencionó explícitamente.
-   — Si el usuario no mencionó un bloque, marcarlo con completed="false".
-2. Llamar `mark_block_completed` para cada bloque según lo que dijo el usuario.
-3. Para experiments/goals: solo avanzar progreso si el bloque fue confirmado por el usuario.
-4. Generar review breve: qué cumplió (según el usuario), qué quedó pendiente, patrón del día si aplica.
+# Your job
+1. Based ONLY on the user's response above, determine which blocks were completed.
+   — NEVER mark a block as completed if the user didn't explicitly mention it.
+   — If the user didn't mention a block, mark it with completed="false".
+2. Call `mark_block_completed` for each block based on what the user said.
+3. For experiments/goals: only advance progress if the block was confirmed by the user.
+4. Generate a brief review: what they completed (per user), what's pending, day pattern if applicable.
 
-Responde con el review final que ve el usuario."""
+Reply with the final review the user sees."""
 
 
 class PlannerAgent:
