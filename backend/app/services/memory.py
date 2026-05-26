@@ -126,13 +126,16 @@ class MemoryManager:
             interactions.reverse()  # cronológico ascendente
 
             for it in interactions:
+                ts = it.get("timestamp", "")
                 self.conversation_buffer.append(
-                    {"role": "user", "content": it.get("user_message", "")}
+                    {"role": "user", "content": it.get("user_message", ""), "timestamp": ts}
                 )
                 self.conversation_buffer.append({
                     "role": "assistant",
                     "content": it.get("agent_response", ""),
                     "actions": it.get("actions", []),
+                    "timestamp": ts,
+                    "proactive": it.get("proactive", False),
                 })
             if interactions:
                 logger.info("Restored %d interactions from Firestore", len(interactions))
@@ -150,11 +153,13 @@ class MemoryManager:
         actions = actions_taken or []
 
         # Capa 1: agregar al buffer de conversación
-        self.conversation_buffer.append({"role": "user", "content": user_message})
+        now_iso = datetime.now(timezone.utc).isoformat()
+        self.conversation_buffer.append({"role": "user", "content": user_message, "timestamp": now_iso})
         self.conversation_buffer.append({
             "role": "assistant",
             "content": agent_response,
             "actions": actions,
+            "timestamp": now_iso,
         })
 
         # Mantener solo los últimos N mensajes
@@ -167,6 +172,36 @@ class MemoryManager:
         asyncio.create_task(
             self._persist_interaction(user_message, agent_response, actions)
         )
+
+    async def save_proactive_message(self, message: str) -> None:
+        """Guarda un mensaje proactivo enviado al usuario (sin respuesta del usuario)."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # Agregar al buffer como mensaje del asistente sin turno de usuario
+        self.conversation_buffer.append({
+            "role": "assistant",
+            "content": message,
+            "actions": [],
+            "timestamp": now_iso,
+            "proactive": True,
+        })
+
+        if len(self.conversation_buffer) > MAX_CONVERSATION_MESSAGES * 2:
+            self.conversation_buffer = self.conversation_buffer[-(MAX_CONVERSATION_MESSAGES * 2):]
+
+        # Persistir en Firestore
+        if self.db is not None:
+            try:
+                self.db.collection(f"{self._prefix}_history").add({
+                    "user_id": self._user_id,
+                    "user_message": "",
+                    "agent_response": message,
+                    "actions": [],
+                    "timestamp": now_iso,
+                    "proactive": True,
+                })
+            except Exception as exc:
+                logger.warning("Failed to persist proactive message: %s", exc)
 
     async def update_user_profile(self, updates: dict[str, Any]) -> None:
         """Actualiza campos del perfil del usuario en Firestore."""

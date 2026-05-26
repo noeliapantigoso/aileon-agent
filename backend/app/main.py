@@ -179,6 +179,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         token=settings.telegram_bot_token,
         allowed_user_id=settings.telegram_allowed_user_id,
         agent=_agent,
+        memory_manager=_memory_manager,
     )
     await _telegram_bot.start()
 

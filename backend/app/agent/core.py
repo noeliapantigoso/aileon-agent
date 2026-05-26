@@ -310,11 +310,50 @@ def _build_contents(
     user_message: str,
 ) -> list[types.Content]:
     """Construye el array de contents para Gemini."""
-    contents: list[types.Content] = []
+    from datetime import datetime, timezone, timedelta
 
-    for msg in conversation_history:
+    contents: list[types.Content] = []
+    prev_ts: datetime | None = None
+
+    for i, msg in enumerate(conversation_history):
         role = "user" if msg["role"] == "user" else "model"
         text = msg.get("content", "")
+        is_proactive = msg.get("proactive", False)
+        ts_str = msg.get("timestamp", "")
+
+        # Parsear timestamp del mensaje
+        curr_ts: datetime | None = None
+        if ts_str:
+            try:
+                curr_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            except Exception:
+                pass
+
+        # Inyectar marcador de tiempo si hay gap significativo
+        if curr_ts and prev_ts:
+            delta = curr_ts - prev_ts
+            if delta >= timedelta(hours=1):
+                hours = int(delta.total_seconds() // 3600)
+                days = delta.days
+                if days >= 1:
+                    gap_note = f"[{days} día(s) sin actividad]"
+                else:
+                    gap_note = f"[{hours} hora(s) sin actividad]"
+                contents.append(types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=gap_note)],
+                ))
+                contents.append(types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(text="Entendido.")],
+                ))
+
+        # Marcar mensajes proactivos que no tuvieron respuesta del usuario
+        if role == "model" and is_proactive:
+            # Verificar si el siguiente mensaje en el buffer es una respuesta del usuario
+            next_msg = conversation_history[i + 1] if i + 1 < len(conversation_history) else None
+            if next_msg is None or next_msg.get("proactive") or next_msg.get("role") == "assistant":
+                text = f"[Mensaje enviado proactivamente, sin respuesta del usuario]\n{text}"
 
         # Si el mensaje asistente tuvo tool calls, anexar info al texto
         actions = msg.get("actions") or []
@@ -324,7 +363,6 @@ def _build_contents(
                 tool_name = a.get("tool", "")
                 args = json.dumps(a.get("args", {}), ensure_ascii=False)
                 result = json.dumps(a.get("result", {}), ensure_ascii=False)
-                # Truncar result para no inflar contexto
                 if len(result) > 400:
                     result = result[:400] + "...}"
                 tool_lines.append(f"  - {tool_name}({args}) → {result}")
@@ -335,6 +373,29 @@ def _build_contents(
             role=role,
             parts=[types.Part.from_text(text=text)],
         ))
+
+        if curr_ts:
+            prev_ts = curr_ts
+
+    # Inyectar gap entre el último mensaje del historial y el mensaje actual
+    now = datetime.now(timezone.utc)
+    if prev_ts:
+        delta = now - prev_ts
+        if delta >= timedelta(hours=1):
+            days = delta.days
+            hours = int(delta.total_seconds() // 3600)
+            if days >= 1:
+                gap_note = f"[{days} día(s) desde el último mensaje]"
+            else:
+                gap_note = f"[{hours} hora(s) desde el último mensaje]"
+            contents.append(types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=gap_note)],
+            ))
+            contents.append(types.Content(
+                role="model",
+                parts=[types.Part.from_text(text="Entendido.")],
+            ))
 
     contents.append(types.Content(
         role="user",

@@ -8,7 +8,7 @@ Solo acepta mensajes del user ID autorizado (un solo usuario).
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from telegram import Update
 from telegram.ext import (
@@ -61,10 +61,12 @@ class TelegramBot:
         token: str,
         allowed_user_id: int,
         agent: ProductivityAgent,
+        memory_manager: Any = None,
     ) -> None:
         self._token = token
         self._allowed_user_id = allowed_user_id
         self._agent = agent
+        self._memory = memory_manager
         self._app: Application | None = None
 
     async def start(self) -> None:
@@ -121,6 +123,7 @@ class TelegramBot:
         if self._app is None:
             logger.error("Bot not initialized, cannot send proactive message")
             return
+        sent = False
         try:
             await self._app.bot.send_message(
                 chat_id=self._allowed_user_id,
@@ -128,6 +131,7 @@ class TelegramBot:
                 parse_mode="Markdown",
             )
             logger.info("Proactive message sent: %s", text[:80])
+            sent = True
         except Exception as md_exc:
             logger.warning(
                 "Markdown parse failed in proactive, retrying plain: %s", md_exc
@@ -138,8 +142,16 @@ class TelegramBot:
                     text=text,
                 )
                 logger.info("Proactive message sent (plain): %s", text[:80])
+                sent = True
             except Exception as exc:
                 logger.error("Failed to send proactive message: %s", exc)
+
+        # Guardar en historial para que el agente sepa que lo envió y no fue respondido
+        if sent and self._memory is not None:
+            try:
+                await self._memory.save_proactive_message(text)
+            except Exception as exc:
+                logger.warning("Failed to save proactive message to memory: %s", exc)
 
     # ── Guards ───────────────────────────────────────────────────────────────
 
