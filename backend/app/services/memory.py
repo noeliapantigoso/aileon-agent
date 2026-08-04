@@ -239,7 +239,7 @@ class MemoryManager:
         if self.mem0 is None:
             return []
         try:
-            results = self.mem0.get_all(user_id=self._user_id)
+            results = self.mem0.get_all(filters={"user_id": self._user_id})
             memories = []
             items = results.get("results", results) if isinstance(results, dict) else results
             for item in (items or []):
