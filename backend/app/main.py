@@ -32,6 +32,7 @@ from app.models.schemas import (
     HealthResponse,
 )
 from app.agent.planner import PlannerAgent
+from app.agent.tick import TickHandler
 from app.services.calendar import (
     CalendarService,
     load_calendar_token_from_secret,
@@ -44,6 +45,7 @@ from app.services.notion import NotionService
 from app.services.principles import PrincipleService
 from app.services.proactive import ProactiveService
 from app.services.tagging import TaggingService
+from app.services.task_scheduler import TaskScheduler
 from app.services.telegram import TelegramBot
 
 # TODO: Descomentar cuando se active ESP32 + voice
@@ -62,6 +64,8 @@ _proactive_service: ProactiveService | None = None
 _insight_service: InsightService | None = None
 _planner_agent: PlannerAgent | None = None
 _calendar_service: CalendarService | None = None
+_task_scheduler: TaskScheduler | None = None
+_tick_handler: TickHandler | None = None
 
 # TODO: Descomentar cuando se active ESP32
 # _stt_service: STTService | None = None
@@ -163,6 +167,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     else:
         logger.warning("Calendar token no disponible — planner deshabilitado")
 
+    # Task Scheduler (one-time queue)
+    global _task_scheduler
+    _task_scheduler = TaskScheduler(
+        db=firestore_client,
+        collection_prefix=settings.firestore_collection_prefix,
+    )
+
     # Agent
     _agent = ProductivityAgent(
         notion_service=_notion_service,
@@ -172,6 +183,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         experiment_service=experiment_service,
         planner=_planner_agent,
         calendar_service=_calendar_service,
+        task_scheduler=_task_scheduler,
     )
 
     # Telegram Bot
@@ -200,6 +212,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             collection_prefix=settings.firestore_collection_prefix,
             user_id=settings.user_id,
         )
+
+    # Tick Handler (replaces individual Cloud Scheduler jobs)
+    global _tick_handler
+    from app.agent.skill_manager import SkillManager
+    _tick_skill_manager = SkillManager(
+        firestore_client=firestore_client,
+        collection_prefix=settings.firestore_collection_prefix,
+    )
+    _tick_handler = TickHandler(
+        skill_manager=_tick_skill_manager,
+        planner=_planner_agent,
+        proactive=_proactive_service,
+        insights=_insight_service,
+        agent=_agent,
+        task_scheduler=_task_scheduler,
+        telegram_bot=_telegram_bot,
+        calendar_service=_calendar_service,
+        user_timezone=settings.user_timezone,
+    )
 
     # Registrar webhook si la URL pública está configurada
     if settings.telegram_webhook_url and settings.telegram_webhook_secret:
@@ -304,6 +335,24 @@ async def weekly_analysis(
 
     result = await _insight_service.run_weekly_analysis()
     return result
+
+
+@app.post("/api/v1/tick")
+async def tick(
+    x_proactive_secret: str = Header(default=""),
+) -> dict:
+    """
+    Hourly tick — replaces all individual Cloud Scheduler jobs.
+
+    Evaluates which skills have a matching cron schedule for the current hour,
+    executes their jobs, and processes any due one-time tasks from the Firestore queue.
+    """
+    settings = get_settings()
+    if not settings.proactive_secret or x_proactive_secret != settings.proactive_secret:
+        raise HTTPException(status_code=403, detail="Invalid secret")
+    if _tick_handler is None:
+        return {"ok": False, "reason": "tick handler not initialized"}
+    return await _tick_handler.run()
 
 
 @app.post("/api/v1/planner/plan-tomorrow")

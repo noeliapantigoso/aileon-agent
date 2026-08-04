@@ -16,6 +16,7 @@ from app.agent.skill_manager import SkillManager
 from app.services.experiments import ExperimentService
 from app.services.memory import MemoryManager
 from app.services.notion import NotionService
+from app.services.task_scheduler import TaskScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class ToolExecutor:
         planner: Any = None,
         calendar: Any = None,
         skill_manager: SkillManager | None = None,
+        task_scheduler: TaskScheduler | None = None,
     ) -> None:
         self.notion = notion
         self.memory = memory
@@ -40,6 +42,7 @@ class ToolExecutor:
         self.calendar = calendar
         self._source = source
         self._skills = skill_manager
+        self._task_scheduler = task_scheduler
 
     async def execute(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         """
@@ -415,6 +418,38 @@ class ToolExecutor:
             logger.error("Failed to delete skill '%s': %s", name, exc)
             return {"error": str(exc)}
 
+    # ── Scheduled tasks ──────────────────────────────────────────────────────
+
+    async def _schedule_task(
+        self, title: str, prompt: str, run_at: str
+    ) -> dict[str, Any]:
+        if self._task_scheduler is None:
+            return {"error": "TaskScheduler not available"}
+        try:
+            task_id = self._task_scheduler.create_task(title, prompt, run_at)
+            return {"status": "scheduled", "task_id": task_id, "title": title, "run_at": run_at}
+        except Exception as exc:
+            logger.error("schedule_task failed: %s", exc)
+            return {"error": str(exc)}
+
+    async def _cancel_scheduled_task(
+        self, task_id: str, task_title: str
+    ) -> dict[str, Any]:
+        if self._task_scheduler is None:
+            return {"error": "TaskScheduler not available"}
+        cancelled = self._task_scheduler.cancel_task(task_id)
+        if cancelled:
+            return {"status": "cancelled", "task": task_title}
+        return {"status": "not_found", "task_id": task_id}
+
+    async def _list_scheduled_tasks(self) -> dict[str, Any]:
+        if self._task_scheduler is None:
+            return {"tasks": [], "message": "TaskScheduler not available"}
+        tasks = self._task_scheduler.list_tasks(status="pending")
+        if not tasks:
+            return {"tasks": [], "message": "No scheduled tasks pending"}
+        return {"tasks": tasks, "count": len(tasks)}
+
     # ── Dispatch map ─────────────────────────────────────────────────────────
 
     _handlers: dict[str, Any] = {
@@ -443,6 +478,9 @@ class ToolExecutor:
         "update_my_profile": _update_my_profile,
         "save_skill": _save_skill,
         "delete_skill": _delete_skill,
+        "schedule_task": _schedule_task,
+        "cancel_scheduled_task": _cancel_scheduled_task,
+        "list_scheduled_tasks": _list_scheduled_tasks,
     }
 
 

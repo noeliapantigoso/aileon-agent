@@ -2,11 +2,13 @@
 name: daily-review
 description: End-of-day review of what was completed — never assumes, always asks
 triggers: [review, cómo me fue, qué hice, cumplí, terminé, how did, end of day, cierre, fin del día, what did i, logré]
+schedule: "0 22 * * *"
+job: planner.daily_review
 ---
 
 # Daily Review
 
-Use this skill when the user asks how their day went, wants to close out the day, or the evening review cron fires.
+Use this skill when the user asks how their day went, wants to close out the day, or the evening review job fires.
 
 ## The most important rule
 
@@ -16,13 +18,26 @@ Use this skill when the user asks how their day went, wants to close out the day
 - User said "yes" or confirmed → task was completed
 - User said "partially" → mark as in_progress, not done
 
-## Procedure
+## When triggered by the user (chat)
 
 1. Call `delegate_to_planner` with `action="daily_review"` and include the user's message as `instruction`
 2. The planner lists today's calendar blocks
 3. Ask: "Which of these did you actually complete?" — list them clearly
 4. Wait for the user's response before marking anything
 5. After confirmation: mark completed blocks as done, update Notion task status accordingly
+
+## Steps for the automated review job
+
+1. List today's plan blocks from the calendar
+2. If user_input is empty → treat all blocks as not completed
+3. Based ONLY on what the user explicitly said, determine which blocks were completed
+4. Call `mark_block_completed` for every block:
+   - Confirmed by user → `"true"`
+   - Not mentioned or user said no → `"false"`
+   - User said partially → `"partial"`
+5. For experiments: only call `log_experiment_progress` if the user confirmed the experiment block was done
+6. For goals: only call `update_goal_progress` if the user confirmed the goal block was done
+7. Generate a brief, empathetic review summary — what was done, what's pending, any notable pattern
 
 ## Tone
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from google import genai
@@ -205,23 +206,7 @@ NEVER use the Z suffix or UTC for blocks you create.
 # Fixed events already in Calendar
 {fixed_events_summary}
 
-# Planning rules
-1. Deep work (high focus) → only during profile peak hours
-2. Operational / repetitive tasks → low energy hours
-3. Each active experiment needs its daily slot or per check_in_every_days
-4. For each short-term goal: calculate remaining hours until target_date and distribute proportionally
-5. 10-15min buffer between blocks
-6. DO NOT overwrite existing fixed events (meetings, etc.)
-7. Blocks 30-90min — no more than 2h continuous
-8. Lunch / breaks NOT optional
-9. If required hours > available hours → flag at end of plan
-10. Based on completion history: DO NOT schedule deep work at hours with <40% completion rate
-
-# Your job
-1. Call `get_completion_history` to check real patterns if needed
-2. Call `list_calendar_events` to confirm free slots for the day
-3. For each block call `create_block` with its goal_id/experiment_id/task_id association
-4. At the end reply with a brief plan summary + warnings if over-allocated
+{skill_rules}
 
 Action: plan the day. Start now."""
 
@@ -234,16 +219,7 @@ VERIFY_PROMPT_TEMPLATE = """You are a planner. Time to verify plan blocks that h
 # Plan blocks that passed in the last 3h
 {recent_blocks}
 
-# Rules
-1. For each UNMARKED block:
-   - If associated with an experiment_id, call `log_experiment_progress` with did_it=true
-     assuming completed (user can correct later if false)
-   - Mark the block with `mark_block_completed` status "true"
-2. For each block marked "false":
-   - Find a free slot in the next 24h and create an equivalent new block
-3. If 2+ "false" for the same experiment in the last 3 days, flag it
-
-Reply with a summary of what you did."""
+{skill_rules}"""
 
 
 EDIT_REQUEST_PROMPT_TEMPLATE = """You are a planner. The user is requesting a specific change to their Calendar. \
@@ -306,15 +282,7 @@ DAILY_REVIEW_PROMPT_TEMPLATE = """You are a planner. End of day — daily review
 # User's response about what they completed
 {user_input}
 
-# Your job
-1. Based ONLY on the user's response above, determine which blocks were completed.
-   — NEVER mark a block as completed if the user didn't explicitly mention it.
-   — If the user didn't mention a block, mark it with completed="false".
-2. Call `mark_block_completed` for each block based on what the user said.
-3. For experiments/goals: only advance progress if the block was confirmed by the user.
-4. Generate a brief review: what they completed (per user), what's pending, day pattern if applicable.
-
-Reply with the final review the user sees."""
+{skill_rules}"""
 
 
 class PlannerAgent:
@@ -347,6 +315,23 @@ class PlannerAgent:
         self._memory = memory_manager
         self._timezone = user_timezone
 
+    # ── Skill loader ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _load_skill_rules(skill_name: str) -> str:
+        """Read a skill .md file and return its content (frontmatter stripped)."""
+        skills_dir = Path(__file__).parent.parent.parent / "skills"
+        skill_path = skills_dir / f"{skill_name}.md"
+        if not skill_path.exists():
+            logger.warning("Skill file not found: %s", skill_path)
+            return ""
+        content = skill_path.read_text(encoding="utf-8")
+        if content.startswith("---"):
+            end = content.find("---", 3)
+            if end != -1:
+                content = content[end + 3:].strip()
+        return content
+
     # ── API pública (llamada desde main agent / endpoints) ─────────────────
 
     async def plan_day(self, target_date_iso: str | None = None) -> dict[str, Any]:
@@ -368,6 +353,7 @@ class PlannerAgent:
             experiments_summary=ctx["experiments_summary"],
             pending_tasks_summary=ctx["pending_tasks_summary"],
             fixed_events_summary=ctx["fixed_events_summary"],
+            skill_rules=self._load_skill_rules("plan-day"),
         )
 
         return await self._run_loop(prompt, mode="plan")
@@ -398,6 +384,7 @@ class PlannerAgent:
         prompt = VERIFY_PROMPT_TEMPLATE.format(
             now_iso=now_lima.isoformat(),
             recent_blocks=json.dumps(plan_events, ensure_ascii=False, indent=2),
+            skill_rules=self._load_skill_rules("verify-blocks"),
         )
         return await self._run_loop(prompt, mode="verify")
 
@@ -447,6 +434,7 @@ class PlannerAgent:
             today_blocks=json.dumps(plan_events, ensure_ascii=False, indent=2),
             stats=json.dumps(stats, ensure_ascii=False, indent=2),
             user_input=user_input_text,
+            skill_rules=self._load_skill_rules("daily-review"),
         )
         return await self._run_loop(prompt, mode="review")
 

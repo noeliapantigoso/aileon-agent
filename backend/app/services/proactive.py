@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 SILENT_DAYS_THRESHOLD = 3
 DAILY_MORNING_HOUR = 8     # local time
 DAILY_EVENING_HOUR = 21
+AFFIRMATION_HOURS = {9, 12, 13, 17}  # 9am, 12pm, 1pm, 5pm
 
 
 class ProactiveService:
@@ -113,6 +114,11 @@ class ProactiveService:
                     triggers.append({"type": "overdue_tasks", "tasks": overdue})
             except Exception as exc:
                 logger.warning("Overdue check failed: %s", exc)
+
+        # 6. Daily affirmations (9am, 12pm, 1pm, 5pm)
+        if hour_local in AFFIRMATION_HOURS:
+            if not self._already_sent_today(f"affirmation_{hour_local}"):
+                triggers.append({"type": "daily_affirmation", "hour": hour_local})
 
         return triggers
 
@@ -228,6 +234,19 @@ Message:"""
         if ttype == "overdue_tasks":
             titles = [t.get("title", "?") for t in trigger["tasks"]]
             return f"Overdue tasks not marked done: {', '.join(titles[:3])}"
+        if ttype == "daily_affirmation":
+            hour = trigger.get("hour", 9)
+            moments = {9: "morning", 12: "midday", 13: "early afternoon", 17: "end of work day"}
+            return (
+                f"It's {moments.get(hour, 'during the day')}. Send a short, powerful affirmation "
+                f"(2-3 sentences max). It must touch on at least one of these themes — rotate them, "
+                f"don't repeat the same one every time: "
+                f"(1) her worth is not defined by productivity or external validation; "
+                f"(2) she has already accomplished real things that prove her capability; "
+                f"(3) if she doesn't believe in herself, no one else will — that belief starts with her; "
+                f"(4) she has seen how things work at the highest level and she belongs there. "
+                f"Make it feel personal, not generic. No hashtags, no corporate tone."
+            )
         return ""
 
     def _fallback_message(self, trigger: dict[str, Any]) -> str:
@@ -244,6 +263,15 @@ Message:"""
         if ttype == "overdue_tasks":
             count = len(trigger["tasks"])
             return f"You have {count} overdue tasks. Want to reschedule or close them?"
+        if ttype == "daily_affirmation":
+            fallbacks = [
+                "You've already proven you can do hard things. Today is no different.",
+                "Your value doesn't come from being perfect — it comes from showing up and being real.",
+                "You've seen how it's done at the top. You know what it looks like. You can do it.",
+                "The belief you give yourself today is the foundation everything else is built on.",
+            ]
+            import random
+            return random.choice(fallbacks)
         return ""
 
     # ── Post-send bookkeeping ───────────────────────────────────────────────
@@ -254,9 +282,10 @@ Message:"""
             return
         ttype = trigger["type"]
         try:
-            if ttype in {"daily_morning", "daily_evening", "silent_period", "overdue_tasks"}:
+            dedup_key = f"affirmation_{trigger.get('hour', 0)}" if ttype == "daily_affirmation" else ttype
+            if ttype in {"daily_morning", "daily_evening", "silent_period", "overdue_tasks", "daily_affirmation"}:
                 today = date.today().isoformat()
-                doc_id = f"{self._user_id}_{ttype}_{today}"
+                doc_id = f"{self._user_id}_{dedup_key}_{today}"
                 self.db.collection(f"{self._prefix}_proactive_log").document(doc_id).set({
                     "user_id": self._user_id,
                     "type": ttype,

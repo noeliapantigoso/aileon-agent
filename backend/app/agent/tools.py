@@ -636,6 +636,73 @@ TOOLS = [
             "required": ["name"],
         },
     },
+    {
+        "name": "schedule_task",
+        "description": (
+            "Schedule a one-time task to run at a specific future datetime. "
+            "Use when the user says things like 'remind me in 3 weeks', "
+            "'check on this goal next month', 'follow up on X on September 15th'. "
+            "The task fires once at the specified time and sends its prompt to the agent."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Short label for the task (shown in the scheduled tasks list)",
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "What to do when the task fires — written as a clear instruction. "
+                        "Example: 'Check in on the journaling experiment: has the user kept it up for 30 days?'"
+                    ),
+                },
+                "run_at": {
+                    "type": "string",
+                    "description": (
+                        "ISO datetime with Lima offset when the task should run. "
+                        "Example: '2026-09-15T09:00:00-05:00'"
+                    ),
+                },
+            },
+            "required": ["title", "prompt", "run_at"],
+        },
+    },
+    {
+        "name": "cancel_scheduled_task",
+        "description": (
+            "Cancel a one-time scheduled task so it won't run. "
+            "Use when the user says 'cancel that reminder', 'don't check on X anymore', "
+            "or when a task is no longer relevant. Call list_scheduled_tasks first to get the task_id."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "The task ID from list_scheduled_tasks",
+                },
+                "task_title": {
+                    "type": "string",
+                    "description": "The task title (for confirmation message to user)",
+                },
+            },
+            "required": ["task_id", "task_title"],
+        },
+    },
+    {
+        "name": "list_scheduled_tasks",
+        "description": (
+            "List all pending one-time scheduled tasks. "
+            "Call this when the user asks 'what do I have scheduled?', "
+            "'what reminders do I have?', or before cancelling a task."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+        },
+    },
 ]
 
 

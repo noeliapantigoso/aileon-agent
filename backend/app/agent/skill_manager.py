@@ -66,6 +66,8 @@ def _skill_from_text(text: str, name_fallback: str, source: str) -> dict[str, An
         "name": meta.get("name", name_fallback),
         "description": meta.get("description", ""),
         "triggers": meta.get("triggers", []),
+        "schedule": meta.get("schedule"),   # cron expression, e.g. "0 23 * * *"
+        "job": meta.get("job"),             # built-in job handler, e.g. "planner.plan_day"
         "body": body,
         "source": source,
         "content": text,
@@ -146,16 +148,8 @@ class SkillManager:
     # ── Relevance detection ───────────────────────────────────────────────────
 
     def get_relevant(self, user_message: str) -> list[dict[str, Any]]:
-        """Return skills matching the user message. Falls back to all if none match."""
-        all_skills = self.get_cached()
-        if not user_message or len(user_message.strip()) < 3:
-            return all_skills
-        msg_norm = _normalize(user_message)
-        matched = [
-            s for s in all_skills
-            if any(_normalize(t) in msg_norm for t in s.get("triggers", []))
-        ]
-        return matched if matched else all_skills
+        """Return all skills — with few skills (<20) loading all is better than keyword matching."""
+        return self.get_cached()
 
     # ── Persistence ───────────────────────────────────────────────────────────
 

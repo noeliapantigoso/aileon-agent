@@ -34,6 +34,7 @@ def build_system_prompt(
     relevant_principles: list[dict[str, Any]] | None = None,
     active_insights: list[dict[str, Any]] | None = None,
     active_skills: str | None = None,
+    active_experiments: list[dict[str, Any]] | None = None,
 ) -> str:
     """
     Ensambla el system prompt completo con todo el contexto.
@@ -309,7 +310,40 @@ Reglas de comunicación:
             )
         sections.append("\n\n".join(princ_lines))
 
-    # ── 6. SKILLS ACTIVAS ────────────────────────────────────────────────
+    # ── 6. EXPERIMENTOS ACTIVOS ──────────────────────────────────────────
+    if active_experiments:
+        exp_lines = ["## Experimentos activos\n"]
+        exp_lines.append(
+            "Estos son los experimentos personales que Noe está corriendo ahora. "
+            "Tenlos en cuenta cuando sea relevante — progreso, adherencia, siguientes check-ins.\n"
+        )
+        for e in active_experiments:
+            name = e.get("name", "")
+            hypothesis = e.get("hypothesis", "")
+            start = e.get("start_date", "")
+            duration = e.get("duration_days", "")
+            check_in = e.get("check_in_every_days", 1)
+            next_check = e.get("next_check_in", "")
+            progress = e.get("progress_log", [])
+            adherence = ""
+            if progress:
+                done = sum(1 for p in progress if p.get("did_it"))
+                adherence = f"{done}/{len(progress)} días ({int(done/len(progress)*100)}%)"
+            line = f"- **{name}**"
+            if hypothesis:
+                line += f": {hypothesis}"
+            if start and duration:
+                line += f" | Inicio: {start}, {duration} días"
+            if check_in:
+                line += f" | Check-in c/{check_in}d"
+            if next_check:
+                line += f" | Próximo: {next_check}"
+            if adherence:
+                line += f" | Adherencia: {adherence}"
+            exp_lines.append(line)
+        sections.append("\n".join(exp_lines))
+
+    # ── 6b. SKILLS ACTIVAS ───────────────────────────────────────────────
     if active_skills:
         sections.append(active_skills)
 
