@@ -496,6 +496,143 @@ TOOLS = [
             "properties": {},
         },
     },
+    {
+        "name": "remember_fact",
+        "description": (
+            "Explicitly save a fact or preference about the user to long-term memory. "
+            "Use when the user says 'remember that...', 'keep in mind that...', or shares "
+            "something personal they want the assistant to always know."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "fact": {
+                    "type": "string",
+                    "description": "The fact to remember, written as a clear statement (e.g. 'Noe prefers short responses when she is stressed')",
+                },
+            },
+            "required": ["fact"],
+        },
+    },
+    {
+        "name": "list_memories",
+        "description": (
+            "List everything stored in long-term memory about the user. "
+            "Use when the user asks 'what do you know about me?', 'what do you remember?', or similar."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "forget_memory",
+        "description": (
+            "Delete a specific memory. Use when the user says 'forget that...', "
+            "'that's no longer true', or wants to remove something you remember. "
+            "First call list_memories to get the memory ID."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "memory_id": {
+                    "type": "string",
+                    "description": "The ID of the memory to delete (from list_memories)",
+                },
+                "memory_text": {
+                    "type": "string",
+                    "description": "The text of the memory being deleted (for confirmation message to user)",
+                },
+            },
+            "required": ["memory_id", "memory_text"],
+        },
+    },
+    {
+        "name": "update_my_profile",
+        "description": (
+            "Update the user's profile — name, work schedule, occupation, preferences, etc. "
+            "Use when the user says something like 'my schedule changed', 'I now work at...', "
+            "'update my profile', or corrects a fact about themselves."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "field": {
+                    "type": "string",
+                    "description": (
+                        "Which part of the profile to update. Examples: "
+                        "'name', 'occupation', 'company', "
+                        "'productivity.work_start', 'productivity.work_end', "
+                        "'preferences.communication_style'"
+                    ),
+                },
+                "value": {
+                    "type": "string",
+                    "description": "The new value for that field",
+                },
+            },
+            "required": ["field", "value"],
+        },
+    },
+    {
+        "name": "save_skill",
+        "description": (
+            "Creates or updates a SKILL.md file — a reusable guide that improves "
+            "how you handle a recurring situation. Use this when you notice a pattern "
+            "the user repeats, learn a new rule or preference that should stick "
+            "permanently, or when the user asks you to remember a procedure. "
+            "The skill will be loaded automatically in future conversations when relevant."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Short slug for the skill (e.g. 'handle-interruptions', "
+                        "'meeting-notes'). Use existing skill names to update them."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": (
+                        "Full SKILL.md content. Must include YAML frontmatter with "
+                        "name, description, and triggers fields, followed by markdown "
+                        "instructions. Example frontmatter:\n"
+                        "---\n"
+                        "name: handle-interruptions\n"
+                        "description: How to handle unexpected interruptions during a planned day\n"
+                        "triggers: [interrupted, distraction, something came up, surgió algo]\n"
+                        "---"
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why you're creating or updating this skill — what pattern triggered it.",
+                },
+            },
+            "required": ["name", "content", "reason"],
+        },
+    },
+    {
+        "name": "delete_skill",
+        "description": (
+            "Permanently deletes a custom skill. Use when the user explicitly asks to "
+            "remove a skill, or when a skill is outdated and shouldn't guide future "
+            "conversations. Built-in skills (plan-day, daily-review, etc.) cannot be "
+            "deleted — use save_skill to override them instead."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name or slug of the skill to delete (e.g. 'handle-interruptions')",
+                },
+            },
+            "required": ["name"],
+        },
+    },
 ]
 
 

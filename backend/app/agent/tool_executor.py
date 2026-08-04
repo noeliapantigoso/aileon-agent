@@ -12,6 +12,7 @@ import logging
 from datetime import date, timedelta
 from typing import Any
 
+from app.agent.skill_manager import SkillManager
 from app.services.experiments import ExperimentService
 from app.services.memory import MemoryManager
 from app.services.notion import NotionService
@@ -30,6 +31,7 @@ class ToolExecutor:
         experiments: ExperimentService | None = None,
         planner: Any = None,
         calendar: Any = None,
+        skill_manager: SkillManager | None = None,
     ) -> None:
         self.notion = notion
         self.memory = memory
@@ -37,6 +39,7 @@ class ToolExecutor:
         self.planner = planner
         self.calendar = calendar
         self._source = source
+        self._skills = skill_manager
 
     async def execute(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         """
@@ -346,6 +349,72 @@ class ToolExecutor:
             return await self.planner.edit_request(instruction=instruction)
         return {"error": f"Acción desconocida: {action}"}
 
+    # ── Memory management ────────────────────────────────────────────────────
+
+    async def _remember_fact(self, fact: str) -> dict[str, Any]:
+        ok = await self.memory.add_memory(fact)
+        if ok:
+            return {"status": "saved", "fact": fact}
+        return {"error": "Memory service not available"}
+
+    async def _list_memories(self) -> dict[str, Any]:
+        memories = await self.memory.list_memories()
+        if not memories:
+            return {"memories": [], "message": "No memories stored yet"}
+        return {"memories": memories, "count": len(memories)}
+
+    async def _forget_memory(self, memory_id: str, memory_text: str) -> dict[str, Any]:
+        ok = await self.memory.delete_memory(memory_id)
+        if ok:
+            return {"status": "deleted", "memory": memory_text}
+        return {"error": f"Could not delete memory '{memory_text}'"}
+
+    async def _update_my_profile(self, field: str, value: str) -> dict[str, Any]:
+        # Support dot notation: "productivity.work_start" → nested dict update
+        keys = field.split(".")
+        if len(keys) == 1:
+            updates = {field: value}
+        else:
+            # Build nested dict: {"productivity": {"work_start": value}}
+            updates = {}
+            d = updates
+            for k in keys[:-1]:
+                d[k] = {}
+                d = d[k]
+            d[keys[-1]] = value
+        await self.memory.update_user_profile(updates)
+        self.memory.invalidate_work_context_cache()
+        return {"status": "updated", "field": field, "value": value}
+
+    # ── Skills ───────────────────────────────────────────────────────────────
+
+    async def _save_skill(
+        self,
+        name: str,
+        content: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        if self._skills is None:
+            return {"error": "SkillManager not available"}
+        try:
+            slug = self._skills.save(name, content, reason)
+            return {"status": "saved", "name": slug, "reason": reason}
+        except Exception as exc:
+            logger.error("Failed to save skill '%s': %s", name, exc)
+            return {"error": str(exc)}
+
+    async def _delete_skill(self, name: str) -> dict[str, Any]:
+        if self._skills is None:
+            return {"error": "SkillManager not available"}
+        try:
+            deleted = self._skills.delete(name)
+            if deleted:
+                return {"status": "deleted", "name": name}
+            return {"status": "not_found", "name": name}
+        except Exception as exc:
+            logger.error("Failed to delete skill '%s': %s", name, exc)
+            return {"error": str(exc)}
+
     # ── Dispatch map ─────────────────────────────────────────────────────────
 
     _handlers: dict[str, Any] = {
@@ -368,6 +437,12 @@ class ToolExecutor:
         "list_active_experiments": _list_active_experiments,
         "delegate_to_planner": _delegate_to_planner,
         "get_calendar_events": _get_calendar_events,
+        "remember_fact": _remember_fact,
+        "list_memories": _list_memories,
+        "forget_memory": _forget_memory,
+        "update_my_profile": _update_my_profile,
+        "save_skill": _save_skill,
+        "delete_skill": _delete_skill,
     }
 
 

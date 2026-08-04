@@ -33,6 +33,7 @@ def build_system_prompt(
     current_datetime: datetime,
     relevant_principles: list[dict[str, Any]] | None = None,
     active_insights: list[dict[str, Any]] | None = None,
+    active_skills: str | None = None,
 ) -> str:
     """
     Ensambla el system prompt completo con todo el contexto.
@@ -308,7 +309,11 @@ Reglas de comunicación:
             )
         sections.append("\n\n".join(princ_lines))
 
-    # ── 6. INSTRUCCIONES DE COMPORTAMIENTO ───────────────────────────────
+    # ── 6. SKILLS ACTIVAS ────────────────────────────────────────────────
+    if active_skills:
+        sections.append(active_skills)
+
+    # ── 7. INSTRUCCIONES DE COMPORTAMIENTO ───────────────────────────────
     sections.append("""## Instrucciones de comportamiento
 
 - Para inputs de voz: puede haber errores de transcripción, interpreta con contexto
@@ -326,6 +331,17 @@ Reglas de comunicación:
 NUNCA respondas con un horario o plan en texto. Si el usuario pide organizar su día,
 planificar bloques, agregar algo al calendario o hacer un review, SIEMPRE llama a
 `delegate_to_planner`. Un plan en texto que no se ejecuta vía tool no existe en el
-calendario real del usuario. Sin excepción.""")
+calendario real del usuario. Sin excepción.
+
+## Skills — cuándo crear o actualizar una
+
+Call `save_skill` when you notice any of these:
+- The user corrects you about how to handle something ("no, when I say X you should do Y")
+- You had to figure out a procedure that wasn't obvious and will likely repeat
+- The user asks you to "remember" a way of doing things
+- You realize an existing skill guide is wrong or incomplete
+
+When saving, generate the full SKILL.md content with proper frontmatter including
+relevant `triggers` keywords so the skill loads automatically next time.""")
 
     return "\n\n".join(sections)

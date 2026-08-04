@@ -17,6 +17,7 @@ from google import genai
 from google.genai import types
 
 from app.agent.prompt_builder import build_system_prompt
+from app.agent.skill_manager import SkillManager, format_skills_for_prompt
 from app.agent.tool_executor import ToolExecutor
 from app.agent.tools import TOOLS
 from app.models.schemas import ActionTaken, AgentResponse
@@ -69,6 +70,11 @@ class ProductivityAgent:
         self._experiments = experiment_service
         self._planner = planner
         self._calendar = calendar_service
+        self._skills = SkillManager(
+            firestore_client=memory_manager.db,
+            collection_prefix=memory_manager._prefix,
+        )
+        self._skills.load_all()
 
     async def process(
         self,
@@ -90,6 +96,7 @@ class ProductivityAgent:
 
         # 2. Construir system prompt
         now = _get_current_datetime(self._timezone)
+        relevant_skills = self._skills.get_relevant(user_message)
         system_prompt = build_system_prompt(
             user_profile=context["user_profile"],
             today_context=context["today_context"],
@@ -97,6 +104,7 @@ class ProductivityAgent:
             current_datetime=now,
             relevant_principles=context.get("relevant_principles", []),
             active_insights=context.get("active_insights", []),
+            active_skills=format_skills_for_prompt(relevant_skills),
         )
 
         # 3. Preparar historial de conversación
@@ -116,6 +124,7 @@ class ProductivityAgent:
             experiments=self._experiments,
             planner=self._planner,
             calendar=self._calendar,
+            skill_manager=self._skills,
         )
         actions_taken: list[ActionTaken] = []
 
@@ -156,6 +165,10 @@ class ProductivityAgent:
 
                     logger.info("Tool call: %s(%s)", tool_name, tool_args)
                     result = await tool_executor.execute(tool_name, tool_args)
+
+                    # Reload skills cache if a skill was saved or deleted
+                    if tool_name in ("save_skill", "delete_skill"):
+                        self._skills.invalidate_cache()
 
                     actions_taken.append(ActionTaken(
                         tool=tool_name,
@@ -212,6 +225,7 @@ class ProductivityAgent:
         # Cargar contexto
         context = await self._memory.get_full_context(user_message)
         now = _get_current_datetime(self._timezone)
+        relevant_skills = self._skills.get_relevant(user_message)
         system_prompt = build_system_prompt(
             user_profile=context["user_profile"],
             today_context=context["today_context"],
@@ -219,6 +233,7 @@ class ProductivityAgent:
             current_datetime=now,
             relevant_principles=context.get("relevant_principles", []),
             active_insights=context.get("active_insights", []),
+            active_skills=format_skills_for_prompt(relevant_skills),
         )
 
         contents = _build_contents(
@@ -233,6 +248,7 @@ class ProductivityAgent:
             experiments=self._experiments,
             planner=self._planner,
             calendar=self._calendar,
+            skill_manager=self._skills,
         )
 
         full_response = ""

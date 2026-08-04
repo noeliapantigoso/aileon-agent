@@ -218,6 +218,49 @@ class MemoryManager:
         except Exception as exc:
             logger.error("Failed to update user profile: %s", exc)
 
+    # ── Memory management (user-facing) ──────────────────────────────────────
+
+    async def add_memory(self, text: str) -> bool:
+        """Explicitly save a fact to Mem0. Returns True on success."""
+        if self.mem0 is None:
+            return False
+        try:
+            self.mem0.add(
+                messages=[{"role": "user", "content": text}],
+                user_id=self._user_id,
+            )
+            return True
+        except Exception as exc:
+            logger.warning("add_memory failed: %s", exc)
+            return False
+
+    async def list_memories(self) -> list[dict[str, Any]]:
+        """Return all stored memories for the user."""
+        if self.mem0 is None:
+            return []
+        try:
+            results = self.mem0.get_all(user_id=self._user_id)
+            memories = []
+            items = results.get("results", results) if isinstance(results, dict) else results
+            for item in (items or []):
+                if isinstance(item, dict) and item.get("memory"):
+                    memories.append({"id": item.get("id", ""), "text": item["memory"]})
+            return memories
+        except Exception as exc:
+            logger.warning("list_memories failed: %s", exc)
+            return []
+
+    async def delete_memory(self, memory_id: str) -> bool:
+        """Delete a specific memory by its Mem0 ID. Returns True on success."""
+        if self.mem0 is None:
+            return False
+        try:
+            self.mem0.delete(memory_id=memory_id)
+            return True
+        except Exception as exc:
+            logger.warning("delete_memory failed: %s", exc)
+            return False
+
     def invalidate_work_context_cache(self) -> None:
         """Invalida el cache de contexto de trabajo (tras crear/actualizar tareas)."""
         self._work_context_cache = None
