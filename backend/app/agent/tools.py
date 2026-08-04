@@ -581,7 +581,10 @@ TOOLS = [
             "how you handle a recurring situation. Use this when you notice a pattern "
             "the user repeats, learn a new rule or preference that should stick "
             "permanently, or when the user asks you to remember a procedure. "
-            "The skill will be loaded automatically in future conversations when relevant."
+            "The skill will be loaded automatically in future conversations when relevant. "
+            "IMPORTANT: after calling this tool, always tell the user what skill you created "
+            "or updated and why, in one short line. Example: "
+            "'📎 Saved skill: handle-interruptions — I'll remember to only move the last block when something comes up.'"
         ),
         "parameters": {
             "type": "object",
