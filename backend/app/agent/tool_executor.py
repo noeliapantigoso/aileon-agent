@@ -65,7 +65,7 @@ class ToolExecutor:
         try:
             result = await handler(self, **args)
             # Invalidar cache de trabajo después de operaciones de escritura
-            if tool_name in ("create_task", "update_task", "save_daily_plan", "create_goal", "update_goal_progress", "update_goal", "archive_goal"):
+            if tool_name in ("create_task", "update_task", "save_daily_plan", "create_goal", "update_goal_progress", "update_goal", "archive_goal", "create_key_result", "complete_key_result"):
                 self.memory.invalidate_work_context_cache()
             return result
         except Exception as exc:
@@ -83,6 +83,7 @@ class ToolExecutor:
         time_estimate_minutes: int | None = None,
         project: str | None = None,
         tags: list[str] | None = None,
+        goal_id: str | None = None,
     ) -> dict[str, Any]:
         source_label = "Voice" if self._source == "esp32" else "Text"
         result = await self.notion.create_task(
@@ -94,6 +95,7 @@ class ToolExecutor:
             project=project,
             tags=tags,
             source=source_label,
+            goal_id=goal_id,
         )
         return {"status": "created", "task": result}
 
@@ -227,6 +229,24 @@ class ToolExecutor:
     async def _archive_goal(self, goal_id: str) -> dict[str, Any]:
         result = await self.notion.archive_goal(goal_id)
         return {"status": "archived", "goal": result}
+
+    async def _create_key_result(
+        self,
+        goal_id: str,
+        title: str,
+        notes: str = "",
+    ) -> dict[str, Any]:
+        result = await self.notion.create_key_result(goal_id=goal_id, title=title, notes=notes)
+        return {"status": "created", "key_result": result}
+
+    async def _get_key_results(self, goal_id: str) -> dict[str, Any]:
+        krs = await self.notion.get_key_results(goal_id)
+        done = sum(1 for kr in krs if kr.get("status") == "Done")
+        return {"key_results": krs, "count": len(krs), "done": done, "pending": len(krs) - done}
+
+    async def _complete_key_result(self, kr_id: str, note: str = "") -> dict[str, Any]:
+        result = await self.notion.mark_kr_done(kr_id=kr_id, note=note)
+        return {"status": "completed", "key_result": result}
 
     async def _get_user_profile(self) -> dict[str, Any]:
         context = await self.memory.get_full_context("")
@@ -453,6 +473,9 @@ class ToolExecutor:
         "schedule_task": _schedule_task,
         "cancel_scheduled_task": _cancel_scheduled_task,
         "list_scheduled_tasks": _list_scheduled_tasks,
+        "create_key_result": _create_key_result,
+        "get_key_results": _get_key_results,
+        "complete_key_result": _complete_key_result,
     }
 
 

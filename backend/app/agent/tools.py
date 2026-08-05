@@ -50,6 +50,10 @@ TOOLS = [
                     "items": {"type": "string"},
                     "description": "Etiquetas para clasificar la tarea",
                 },
+                "goal_id": {
+                    "type": "string",
+                    "description": "ID de la meta en Notion a la que pertenece esta tarea (opcional)",
+                },
             },
             "required": ["title"],
         },
@@ -312,6 +316,71 @@ TOOLS = [
                 },
             },
             "required": ["goal_id", "progress_note"],
+        },
+    },
+    {
+        "name": "create_key_result",
+        "description": (
+            "Crea un Key Result (KR) para una meta. Llamar cuando el usuario define "
+            "un resultado clave que indica que la meta se cumplió. "
+            "Si no tienes el goal_id, primero llama get_goals."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "goal_id": {
+                    "type": "string",
+                    "description": "ID de la meta en Notion",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Descripción del resultado clave. Ej: 'Completar el curso de ML en Coursera'",
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Contexto adicional o criterios de completitud",
+                },
+            },
+            "required": ["goal_id", "title"],
+        },
+    },
+    {
+        "name": "get_key_results",
+        "description": (
+            "Lista los Key Results de una meta con su estado (Pending/Done). "
+            "Usar para ver qué KRs quedan pendientes o cuáles ya se completaron."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "goal_id": {
+                    "type": "string",
+                    "description": "ID de la meta en Notion",
+                },
+            },
+            "required": ["goal_id"],
+        },
+    },
+    {
+        "name": "complete_key_result",
+        "description": (
+            "Marca un Key Result como Done y recalcula automáticamente el progreso de la meta. "
+            "Usar cuando el usuario confirma que logró un KR, o cuando el contexto lo indica claramente. "
+            "No pedir confirmación si el usuario lo dijo explícitamente."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kr_id": {
+                    "type": "string",
+                    "description": "ID del Key Result en Notion",
+                },
+                "note": {
+                    "type": "string",
+                    "description": "Nota de cómo o cuándo se completó",
+                },
+            },
+            "required": ["kr_id"],
         },
     },
     {

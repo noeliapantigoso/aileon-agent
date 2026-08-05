@@ -90,6 +90,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "notes": settings.notion_notes_db,
             "goals": settings.notion_goals_db,
             "daily_agenda": settings.notion_daily_agenda_db,
+            "key_results": settings.notion_key_results_db,
         },
     )
 

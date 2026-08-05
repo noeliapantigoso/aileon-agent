@@ -31,13 +31,18 @@ Use this skill when the user asks how their day went, wants to close out the day
 1. List today's plan blocks from the calendar
 2. If user_input is empty → treat all blocks as not completed
 3. Based ONLY on what the user explicitly said, determine which blocks were completed
-4. Call `mark_block_completed` for every block:
+4. Call `mark_block_completed` for EVERY block (no exceptions):
    - Confirmed by user → `"true"`
-   - Not mentioned or user said no → `"false"`
-   - User said partially → `"partial"`
+   - Not mentioned, user said no, or said partially → `"false"`
+
+   When `completed=false` and the block has no linked task, the system automatically creates
+   a Notion task so nothing gets lost. You don't need to do anything extra.
 5. For experiments: only call `log_experiment_progress` if the user confirmed the experiment block was done
-6. For goals: only call `update_goal_progress` if the user confirmed the goal block was done
-7. Generate a brief, empathetic review summary — what was done, what's pending, any notable pattern
+6. For goals: check if any completed blocks had a `goal_id`. If so, call `get_key_results(goal_id)` and
+   read the pending KRs. If the work done clearly satisfies a KR (title matches what was done), call
+   `mark_kr_done`. Do not mark KRs based on ambiguous evidence — only clear matches.
+7. Generate a brief, empathetic review summary — what was done, what's pending, any notable pattern.
+   If a KR was completed, highlight it: "✅ KR completado: [title] → meta al X%"
 
 ## Tone
 

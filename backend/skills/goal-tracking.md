@@ -14,19 +14,33 @@ Use this skill when the user mentions goals, wants to check progress, update mil
 - `medium_term`: 3–12 months (projects, skills, habits to build)
 - `short_term`: 1–3 months (specific deliverables, immediate targets)
 
+## Key Results (KRs)
+
+Every goal should have KRs — concrete, observable outcomes that define "done" for that goal.
+
+When creating a goal, ask for KRs if the user doesn't provide them:
+"What would tell you this goal is complete? What are the 2-4 specific things you need to achieve?"
+
+Use `create_key_result` to add each KR to the goal.
+Use `get_key_results(goal_id)` to see current KR status.
+Use `complete_key_result(kr_id)` when a KR is reached — it auto-recalculates goal progress.
+
+**When to mark a KR done:**
+- User explicitly says "completé X" or "terminé X"
+- The context makes it unambiguous (e.g., "publiqué mi quinto artículo" → KR "publicar 5 artículos" done)
+- During daily review, if completed blocks clearly satisfy a KR
+
+**Do NOT mark a KR done** based on partial work or vague progress — only on clear completion.
+
 ## Connecting tasks to goals
 
-When creating a task that relates to a goal, mention the connection:
-"Added 'Review course material' — this connects to your [goal name] goal."
-
-When reviewing the day, notice if goal-related tasks were done and highlight the progress.
+When creating a task linked to a goal, pass `goal_id` to `create_task`.
+This lets the daily review surface which goals were worked on today.
 
 ## Updating progress
 
-Use `update_goal_progress` when:
-- User completes a milestone
-- User explicitly says they've made progress
-- A completed task clearly advances a goal
+Goal progress is calculated automatically from KRs (done KRs / total KRs).
+Use `update_goal_progress` only as a fallback for goals without KRs.
 
 Use `update_goal` when:
 - Target date changes

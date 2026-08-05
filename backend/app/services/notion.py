@@ -42,6 +42,7 @@ class NotionService:
         project: Optional[str] = None,
         tags: Optional[list[str]] = None,
         source: str = "Voice",
+        goal_id: Optional[str] = None,
     ) -> dict[str, Any]:
         """Crea una nueva tarea en la database de Tasks."""
         properties: dict[str, Any] = {
@@ -61,6 +62,8 @@ class NotionService:
             properties["Tags"] = {
                 "multi_select": [{"name": t} for t in tags]
             }
+        if goal_id:
+            properties["Goal"] = {"relation": [{"id": goal_id}]}
 
         try:
             page = await self.client.pages.create(
@@ -549,6 +552,93 @@ class NotionService:
             logger.error("Notion update_goal_progress error: %s", exc)
             raise
 
+    # ── Key Results ──────────────────────────────────────────────────────────
+
+    async def create_key_result(
+        self,
+        goal_id: str,
+        title: str,
+        notes: str = "",
+    ) -> dict[str, Any]:
+        """Crea un Key Result vinculado a una meta."""
+        if not self.db_ids.get("key_results"):
+            raise ValueError("Key Results database not configured (NOTION_KEY_RESULTS_DB)")
+        properties: dict[str, Any] = {
+            "Name": {"title": [{"text": {"content": title}}]},
+            "Goal": {"relation": [{"id": goal_id}]},
+            "Status": {"select": {"name": "Pending"}},
+        }
+        if notes:
+            properties["Notes"] = {
+                "rich_text": [{"type": "text", "text": {"content": notes[:1900]}}]
+            }
+        try:
+            page = await self.client.pages.create(
+                parent={"database_id": self.db_ids["key_results"]},
+                properties=properties,
+            )
+            return _simplify_kr(page)
+        except APIResponseError as exc:
+            logger.error("Notion create_key_result error: %s", exc)
+            raise
+
+    async def get_key_results(self, goal_id: str) -> list[dict[str, Any]]:
+        """Lista los KRs de una meta."""
+        if not self.db_ids.get("key_results"):
+            return []
+        try:
+            response = await self.client.databases.query(
+                database_id=self.db_ids["key_results"],
+                filter={"property": "Goal", "relation": {"contains": goal_id}},
+                page_size=20,
+            )
+            return [_simplify_kr(page) for page in response["results"]]
+        except APIResponseError as exc:
+            logger.error("Notion get_key_results error: %s", exc)
+            raise
+
+    async def mark_kr_done(self, kr_id: str, note: str = "") -> dict[str, Any]:
+        """Marca un KR como Done y recalcula el progreso de la meta."""
+        properties: dict[str, Any] = {"Status": {"select": {"name": "Done"}}}
+        try:
+            page = await self.client.pages.update(page_id=kr_id, properties=properties)
+            if note:
+                await self.client.blocks.children.append(
+                    block_id=kr_id,
+                    children=[{
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": [{
+                                "type": "text",
+                                "text": {"content": f"[{datetime.now().strftime('%Y-%m-%d')}] {note}"},
+                            }]
+                        },
+                    }],
+                )
+            goal_id = _extract_relation_first(page.get("properties", {}), "Goal")
+            if goal_id:
+                await self._recalculate_goal_progress(goal_id)
+            return _simplify_kr(page)
+        except APIResponseError as exc:
+            logger.error("Notion mark_kr_done error: %s", exc)
+            raise
+
+    async def _recalculate_goal_progress(self, goal_id: str) -> None:
+        """Recalcula el progreso de una meta como fracción de KRs completados."""
+        krs = await self.get_key_results(goal_id)
+        if not krs:
+            return
+        done = sum(1 for kr in krs if kr.get("status") == "Done")
+        progress = done / len(krs)
+        try:
+            await self.client.pages.update(
+                page_id=goal_id,
+                properties={"Progress": {"number": progress}},
+            )
+        except APIResponseError as exc:
+            logger.warning("Could not recalculate goal progress for %s: %s", goal_id, exc)
+
     async def close(self) -> None:
         """Cierra el cliente de Notion."""
         await self.client.aclose()
@@ -569,7 +659,19 @@ def _simplify_task(page: dict) -> dict[str, Any]:
         "scheduled_date": _extract_date(props, "Scheduled Date"),
         "time_estimate": props.get("Time Estimate", {}).get("number"),
         "tags": _extract_multi_select(props, "Tags"),
+        "goal_id": _extract_relation_first(props, "Goal"),
         "url": page.get("url", ""),
+    }
+
+
+def _simplify_kr(page: dict) -> dict[str, Any]:
+    """Extrae campos clave de un page object de Notion Key Results."""
+    props = page.get("properties", {})
+    return {
+        "id": page["id"],
+        "title": _extract_title(page),
+        "status": _extract_select(props, "Status") or "Pending",
+        "notes": _extract_rich_text(props, "Notes"),
     }
 
 
@@ -620,6 +722,22 @@ def _extract_date(props: dict, key: str) -> Optional[str]:
     date_val = prop.get("date")
     if date_val:
         return date_val.get("start")
+    return None
+
+
+def _extract_rich_text(props: dict, key: str) -> str:
+    """Extrae texto de un campo rich_text."""
+    prop = props.get(key, {})
+    items = prop.get("rich_text", [])
+    return "".join(item.get("text", {}).get("content", "") for item in items)
+
+
+def _extract_relation_first(props: dict, key: str) -> Optional[str]:
+    """Extrae el primer ID de un campo relation."""
+    prop = props.get(key, {})
+    relations = prop.get("relation", [])
+    if relations:
+        return relations[0].get("id")
     return None
 
 

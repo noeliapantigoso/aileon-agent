@@ -110,7 +110,7 @@ PLANNER_TOOLS = [
                 "event_id": {"type": "string"},
                 "completed": {
                     "type": "string",
-                    "enum": ["true", "false", "partial"],
+                    "enum": ["true", "false"],
                 },
                 "note": {"type": "string"},
             },
@@ -164,6 +164,35 @@ PLANNER_TOOLS = [
                 "new_percentage": {"type": "integer"},
             },
             "required": ["goal_id", "progress_note"],
+        },
+    },
+    {
+        "name": "get_key_results",
+        "description": (
+            "Lee los Key Results de una meta para informar qué agendar. "
+            "Usar cuando se planea un día y se quiere saber qué KRs están pendientes."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "goal_id": {"type": "string"},
+            },
+            "required": ["goal_id"],
+        },
+    },
+    {
+        "name": "mark_kr_done",
+        "description": (
+            "Marca un KR como completado y recalcula el progreso de la meta. "
+            "Usar en el daily review cuando la evidencia indica que se alcanzó un KR."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kr_id": {"type": "string"},
+                "note": {"type": "string"},
+            },
+            "required": ["kr_id"],
         },
     },
 ]
@@ -640,12 +669,22 @@ class PlannerAgent:
                     note=args.get("note"),
                 )
                 task_id = (ev or {}).get("task_id")
+                goal_id = (ev or {}).get("goal_id")
+                raw_summary = (ev or {}).get("summary", "")
+                block_title = _clean_block_title(raw_summary)
                 notion_update = None
-                if task_id:
-                    if completed_val == "true":
+
+                if completed_val == "true":
+                    if task_id:
                         notion_update = await self._notion.update_task(task_id, status="done")
-                    elif completed_val == "partial":
-                        notion_update = await self._notion.update_task(task_id, status="in progress")
+                else:  # false — not completed
+                    if task_id:
+                        notion_update = await self._notion.update_task(task_id, status="next")
+                    elif block_title:
+                        notion_update = await self._notion.create_task(
+                            title=block_title, priority="P2", goal_id=goal_id, source="Text"
+                        )
+
                 return {"marked": ev, "notion_updated": notion_update}
 
             if name == "get_completion_history":
@@ -679,6 +718,18 @@ class PlannerAgent:
                 )
                 return {"updated": result}
 
+            if name == "get_key_results":
+                krs = await self._notion.get_key_results(args["goal_id"])
+                done = sum(1 for kr in krs if kr.get("status") == "Done")
+                return {"key_results": krs, "count": len(krs), "done": done, "pending": len(krs) - done}
+
+            if name == "mark_kr_done":
+                result = await self._notion.mark_kr_done(
+                    kr_id=args["kr_id"],
+                    note=args.get("note", ""),
+                )
+                return {"completed": result}
+
             return {"error": f"Tool desconocida: {name}"}
         except Exception as exc:
             logger.error("Planner tool %s failed: %s", name, exc)
@@ -690,3 +741,12 @@ class PlannerAgent:
 
 def _day_name_es(d) -> str:
     return ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"][d.weekday()]
+
+
+def _clean_block_title(summary: str) -> str:
+    """Strips calendar emoji prefixes and [plan] tag from a block summary."""
+    for prefix in ("✅ ", "❌ ", "⚠️ "):
+        summary = summary.replace(prefix, "")
+    if summary.startswith("[plan] "):
+        summary = summary[7:]
+    return summary.strip()
