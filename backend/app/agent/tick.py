@@ -199,7 +199,7 @@ class TickHandler:
                 from zoneinfo import ZoneInfo
                 tz = ZoneInfo(self._timezone)
                 today_local = self._now_lima().date()
-                day_start = datetime.combine(today_local, datetime.min.time()).replace(tzinfo=_tz.utc)
+                day_start = datetime.combine(today_local, datetime.min.time()).replace(tzinfo=tz)
                 day_end = day_start + __import__("datetime").timedelta(days=1)
                 events = self._calendar.list_events(start=day_start, end=day_end)
                 plan_events = [e for e in events if "[plan]" in (e.get("summary") or "")]

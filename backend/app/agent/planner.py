@@ -419,9 +419,9 @@ class PlannerAgent:
 
     async def daily_review(self, day_iso: str | None = None, user_input: str = "") -> dict[str, Any]:
         """Review del día. Default: hoy."""
-        from datetime import timezone
+        from zoneinfo import ZoneInfo
         day = date.fromisoformat(day_iso) if day_iso else date.today()
-        start = datetime.combine(day, datetime.min.time()).replace(tzinfo=timezone.utc)
+        start = datetime.combine(day, datetime.min.time()).replace(tzinfo=ZoneInfo(self._timezone))
         end = start + timedelta(days=1)
 
         events = self._calendar.list_events(start=start, end=end)
@@ -442,6 +442,7 @@ class PlannerAgent:
 
     async def _build_planning_context(self, target_date) -> dict[str, str]:
         from datetime import timezone
+        from zoneinfo import ZoneInfo
 
         # Perfil
         profile = await self._memory._get_user_profile() if self._memory else {}
@@ -510,7 +511,7 @@ class PlannerAgent:
         ) or "(ninguna)"
 
         # Fixed events del target_date
-        day_start = datetime.combine(target_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+        day_start = datetime.combine(target_date, datetime.min.time()).replace(tzinfo=ZoneInfo(self._timezone))
         day_end = day_start + timedelta(days=1)
         events = self._calendar.list_events(start=day_start, end=day_end)
         fixed_events = [e for e in events if "[plan]" not in (e.get("summary") or "")]
