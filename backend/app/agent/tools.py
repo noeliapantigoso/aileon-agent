@@ -188,28 +188,6 @@ TOOLS = [
         },
     },
     {
-        "name": "organize_day",
-        "description": (
-            "Genera un plan organizado para un día específico. Consulta tareas "
-            "pendientes, metas activas y eventos, luego crea un plan con time "
-            "blocks y lo guarda en Notion."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "date": {
-                    "type": "string",
-                    "description": "Fecha a organizar (YYYY-MM-DD). Default: mañana.",
-                },
-                "focus_areas": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Áreas en las que el usuario quiere enfocarse",
-                },
-            },
-        },
-    },
-    {
         "name": "create_goal",
         "description": (
             "Crea una meta nueva en Notion. Usar cuando el usuario quiere agregar "

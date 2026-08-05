@@ -163,33 +163,6 @@ class ToolExecutor:
         agenda = await self.notion.get_daily_agenda(date)
         return {"agenda": agenda}
 
-    async def _organize_day(
-        self,
-        date: str | None = None,
-        focus_areas: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """
-        Recopila info necesaria para organizar un día.
-        El LLM usará estos datos para generar el plan y luego
-        llamará a save_daily_plan.
-        """
-        if not date:
-            tomorrow = date_module_today() + timedelta(days=1)
-            date = tomorrow.isoformat()
-
-        # Recopilar datos
-        tasks = await self.notion.get_tasks(status="pending", limit=30)
-        goals = await self.notion.get_goals(status="active")
-        existing_agenda = await self.notion.get_daily_agenda(date)
-
-        return {
-            "date": date,
-            "pending_tasks": tasks,
-            "active_goals": goals,
-            "existing_agenda": existing_agenda,
-            "focus_areas": focus_areas or [],
-        }
-
     async def _create_goal(
         self,
         title: str,
@@ -459,7 +432,6 @@ class ToolExecutor:
         "save_note": _save_note,
         "search_notes": _search_notes,
         "get_daily_agenda": _get_daily_agenda,
-        "organize_day": _organize_day,
         "create_goal": _create_goal,
         "get_goals": _get_goals,
         "update_goal_progress": _update_goal_progress,
