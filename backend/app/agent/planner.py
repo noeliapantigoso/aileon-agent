@@ -339,7 +339,7 @@ class PlannerAgent:
         if target_date_iso:
             target = date.fromisoformat(target_date_iso)
         else:
-            target = self._now_lima().date() + timedelta(days=1)
+            target = date.today() + timedelta(days=1)
 
         ctx = await self._build_planning_context(target)
         prompt = PLAN_DAY_PROMPT_TEMPLATE.format(
@@ -420,7 +420,7 @@ class PlannerAgent:
     async def daily_review(self, day_iso: str | None = None, user_input: str = "") -> dict[str, Any]:
         """Review del día. Default: hoy."""
         from datetime import timezone
-        day = date.fromisoformat(day_iso) if day_iso else self._now_lima().date()
+        day = date.fromisoformat(day_iso) if day_iso else date.today()
         start = datetime.combine(day, datetime.min.time()).replace(tzinfo=timezone.utc)
         end = start + timedelta(days=1)
 
