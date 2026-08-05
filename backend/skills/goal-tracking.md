@@ -14,38 +14,61 @@ Use this skill when the user mentions goals, wants to check progress, update mil
 - `medium_term`: 3–12 months (projects, skills, habits to build)
 - `short_term`: 1–3 months (specific deliverables, immediate targets)
 
-## Key Results (KRs)
+## Creating a goal — flow obligatorio
 
-Every goal should have KRs — concrete, observable outcomes that define "done" for that goal.
+**NUNCA crear una meta sin fecha límite ni sin KRs.** Seguir siempre estos pasos:
 
-When creating a goal, ask for KRs if the user doesn't provide them:
-"What would tell you this goal is complete? What are the 2-4 specific things you need to achieve?"
+### Paso 1 — recopilar datos (en una sola pregunta si faltan)
+Antes de llamar cualquier tool, asegurarse de tener:
+- Título claro de la meta
+- Fecha límite (`target_date`) — si el usuario dice "en 6 meses" calcularla como fecha exacta
+- Área (`area`): work / personal / health / finance / learning / relationships
+- Al menos 2 KRs concretos y observables
 
-Use `create_key_result` to add each KR to the goal.
-Use `get_key_results(goal_id)` to see current KR status.
-Use `complete_key_result(kr_id)` when a KR is reached — it auto-recalculates goal progress.
+Si falta algo, preguntar todo junto de una vez:
+> "Para crear la meta necesito: ¿cuál es la fecha límite? ¿A qué área pertenece (trabajo, aprendizaje, salud...)? ¿Cuáles serían los 2-4 resultados concretos que indicarían que la lograste?"
 
-**When to mark a KR done:**
-- User explicitly says "completé X" or "terminé X"
-- The context makes it unambiguous (e.g., "publiqué mi quinto artículo" → KR "publicar 5 artículos" done)
-- During daily review, if completed blocks clearly satisfy a KR
+### Paso 2 — crear la meta
+Llamar `create_goal` con title, goal_type, area y target_date.
 
-**Do NOT mark a KR done** based on partial work or vague progress — only on clear completion.
+### Paso 3 — crear los KRs
+Para cada KR, llamar `create_key_result(goal_id, title)`.
+Los KRs deben ser observables: "Completar el curso X", "Publicar 3 artículos", "Alcanzar 10k seguidores".
+No crear KRs vagos como "mejorar en ML" — reformularlos antes.
+
+### Paso 4 — mostrar resumen
+Responder con un resumen claro:
+```
+✅ Meta creada: [título]
+📅 Fecha límite: [fecha]
+🎯 Key Results:
+  1. [KR1]
+  2. [KR2]
+  3. [KR3]
+```
+
+## Consultar y actualizar metas
+
+Use `get_goals` para ver el estado actual.
+Use `get_key_results(goal_id)` para ver KRs de una meta específica.
+Use `complete_key_result(kr_id)` cuando un KR se alcanza — recalcula el progreso automáticamente.
+Use `update_goal_progress` solo como fallback para metas sin KRs.
+Use `update_goal` para cambiar título, fecha, área o status (active → paused → completed).
+
+**Cuándo marcar un KR como done:**
+- Usuario dice explícitamente "completé X" o "terminé X"
+- El contexto lo hace inequívoco ("publiqué mi quinto artículo" → KR "publicar 5 artículos" done)
+- En el daily review, si un bloque completado claramente satisface un KR
 
 ## Connecting tasks to goals
 
 When creating a task linked to a goal, pass `goal_id` to `create_task`.
-This lets the daily review surface which goals were worked on today.
 
-## Updating progress
+## Tone around goals
 
-Goal progress is calculated automatically from KRs (done KRs / total KRs).
-Use `update_goal_progress` only as a fallback for goals without KRs.
-
-Use `update_goal` when:
-- Target date changes
-- Goal definition evolves
-- Status changes (active → paused → completed)
+- Goals are personal — treat them with weight, not as checkboxes
+- If a goal hasn't been touched in a while, ask once (don't repeat every day)
+- Celebrate when a KR or goal is reached — it deserves a real acknowledgment
 
 ## Tone around goals
 

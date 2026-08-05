@@ -194,8 +194,8 @@ TOOLS = [
     {
         "name": "create_goal",
         "description": (
-            "Crea una meta nueva en Notion. Usar cuando el usuario quiere agregar "
-            "una meta de corto/mediano/largo plazo. Pregunta área y target_date si faltan."
+            "Crea una meta nueva en Notion. NUNCA llamar sin target_date — "
+            "siempre preguntar la fecha límite antes de crear."
         ),
         "parameters": {
             "type": "object",
@@ -216,18 +216,10 @@ TOOLS = [
                 },
                 "target_date": {
                     "type": "string",
-                    "description": "Fecha objetivo YYYY-MM-DD",
-                },
-                "key_results": {
-                    "type": "string",
-                    "description": "KRs medibles que indican que la meta se cumplió",
-                },
-                "initial_progress": {
-                    "type": "integer",
-                    "description": "Progreso inicial 0-100, default 0",
+                    "description": "Fecha límite obligatoria en YYYY-MM-DD. Sin fecha no se crea la meta.",
                 },
             },
-            "required": ["title", "goal_type"],
+            "required": ["title", "goal_type", "target_date", "area"],
         },
     },
     {
