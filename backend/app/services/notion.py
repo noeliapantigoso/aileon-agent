@@ -508,7 +508,7 @@ class NotionService:
         properties: dict[str, Any] = {}
 
         if new_percentage is not None:
-            properties["Progress"] = {"number": new_percentage}
+            properties["Progress"] = {"number": new_percentage / 100.0}
 
         try:
             # Actualizar propiedades si hay cambios
@@ -581,7 +581,7 @@ def _simplify_goal(page: dict) -> dict[str, Any]:
         "title": _extract_title(page),
         "type": _extract_select(props, "Type"),
         "status": _extract_select(props, "Status"),
-        "progress": props.get("Progress", {}).get("number", 0),
+        "progress": round(props.get("Progress", {}).get("number", 0) * 100),
         "target_date": _extract_date(props, "Target Date"),
         "area": _extract_select(props, "Area"),
     }

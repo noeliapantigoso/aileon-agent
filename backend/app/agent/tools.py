@@ -65,7 +65,7 @@ TOOLS = [
             "properties": {
                 "status": {
                     "type": "string",
-                    "enum": ["pending", "in_progress", "done", "all"],
+                    "enum": ["pending", "in_progress", "waiting", "done", "all"],
                     "description": "Filtrar por estado",
                 },
                 "date": {
@@ -239,7 +239,7 @@ TOOLS = [
                 },
                 "status": {
                     "type": "string",
-                    "enum": ["active", "completed", "all"],
+                    "enum": ["active", "completed", "paused", "abandoned", "all"],
                     "description": "Filtrar por estado",
                 },
             },
