@@ -41,8 +41,12 @@ Use this skill when the user asks how their day went, wants to close out the day
 6. For goals: check if any completed blocks had a `goal_id`. If so, call `get_key_results(goal_id)` and
    read the pending KRs. If the work done clearly satisfies a KR (title matches what was done), call
    `mark_kr_done`. Do not mark KRs based on ambiguous evidence — only clear matches.
-7. Generate a brief, empathetic review summary — what was done, what's pending, any notable pattern.
-   If a KR was completed, highlight it: "✅ KR completado: [title] → meta al X%"
+7. Generate a Telegram-ready review summary that includes:
+   - ✅ Blocks completed (list them)
+   - ❌ Blocks not done → mention that a Notion task was created for each
+   - 🎯 Any KR completed: "KR completado: [title] → meta al X%"
+   - One observation about the day (pattern, win, or something to watch)
+   Keep it concise and scannable — no wall of text.
 
 ## Tone
 

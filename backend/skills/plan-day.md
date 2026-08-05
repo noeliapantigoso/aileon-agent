@@ -43,7 +43,12 @@ Never write a plan in text. The plan only exists if it's in the calendar.
 1. Call `list_calendar_events` to see fixed events already in the calendar for the target day
 2. Call `get_completion_history` to check real historical patterns before placing deep work blocks
 3. For each block, call `create_block` with its goal_id / experiment_id / task_id when applicable
-4. End with a brief summary: blocks created, total hours planned, any warnings if over-allocated
+4. End with a Telegram-ready summary that includes:
+   - Each block created: time, title, and ONE sentence explaining why it was placed there
+     (e.g. "9-10:30am — Deep work ML → peak hour, KR 'Completar curso' pendiente")
+   - Any tasks that didn't fit and why
+   - Total hours planned
+   Keep it scannable — bullet points, no wall of text.
 
 ## Datetime format (critical)
 
