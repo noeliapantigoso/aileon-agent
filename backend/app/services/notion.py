@@ -49,7 +49,6 @@ class NotionService:
             "Name": {"title": [{"text": {"content": title}}]},
             "Status": {"select": {"name": "Inbox"}},
             "Priority": {"select": {"name": priority.upper()}},
-            "Created By": {"select": {"name": source}},
         }
 
         if due_date:
@@ -63,7 +62,7 @@ class NotionService:
                 "multi_select": [{"name": t} for t in tags]
             }
         if goal_id:
-            properties["Goal"] = {"relation": [{"id": goal_id}]}
+            properties["Goals"] = {"relation": [{"id": goal_id}]}
 
         try:
             page = await self.client.pages.create(
@@ -244,101 +243,6 @@ class NotionService:
             return results
         except APIResponseError as exc:
             logger.error("Notion search_notes error: %s", exc)
-            raise
-
-    # ── Daily Agenda ─────────────────────────────────────────────────────────
-
-    async def get_daily_agenda(self, date_str: Optional[str] = None) -> dict[str, Any]:
-        """Obtiene la agenda del día. Si no existe, retorna tareas programadas."""
-        if not date_str:
-            date_str = date.today().isoformat()
-
-        # Buscar en Daily Agenda database
-        try:
-            response = await self.client.databases.query(
-                database_id=self.db_ids["daily_agenda"],
-                filter={
-                    "property": "Date",
-                    "date": {"equals": date_str},
-                },
-                page_size=1,
-            )
-
-            if response["results"]:
-                page = response["results"][0]
-                return {
-                    "id": page["id"],
-                    "date": date_str,
-                    "exists": True,
-                    "url": page["url"],
-                }
-
-        except APIResponseError as exc:
-            logger.warning("Could not query daily agenda: %s", exc)
-
-        # Fallback: obtener tareas programadas para el día
-        tasks = await self.get_tasks(date=date_str)
-        return {
-            "date": date_str,
-            "exists": False,
-            "scheduled_tasks": tasks,
-        }
-
-    async def save_daily_plan(
-        self,
-        date_str: str,
-        plan_text: str,
-        top_tasks: Optional[list[str]] = None,
-    ) -> dict[str, Any]:
-        """Crea o actualiza la agenda del día en Notion."""
-        properties: dict[str, Any] = {
-            "Date": {"date": {"start": date_str}},
-        }
-
-        # Buscar si ya existe
-        existing = await self.get_daily_agenda(date_str)
-
-        children = _text_to_blocks(plan_text)
-
-        try:
-            if existing.get("exists"):
-                # Actualizar página existente
-                page_id = existing["id"]
-                # Borrar contenido existente y agregar nuevo
-                existing_blocks = await self.client.blocks.children.list(
-                    block_id=page_id
-                )
-                for block in existing_blocks["results"]:
-                    await self.client.blocks.delete(block_id=block["id"])
-
-                await self.client.blocks.children.append(
-                    block_id=page_id,
-                    children=children,
-                )
-                return {
-                    "id": page_id,
-                    "date": date_str,
-                    "action": "updated",
-                }
-            else:
-                # Crear nueva página
-                title = f"Plan {date_str}"
-                properties["Name"] = {
-                    "title": [{"text": {"content": title}}]
-                }
-                page = await self.client.pages.create(
-                    parent={"database_id": self.db_ids["daily_agenda"]},
-                    properties=properties,
-                    children=children,
-                )
-                return {
-                    "id": page["id"],
-                    "date": date_str,
-                    "action": "created",
-                    "url": page["url"],
-                }
-        except APIResponseError as exc:
-            logger.error("Notion save_daily_plan error: %s", exc)
             raise
 
     # ── Goals ────────────────────────────────────────────────────────────────
@@ -565,7 +469,7 @@ class NotionService:
             raise ValueError("Key Results database not configured (NOTION_KEY_RESULTS_DB)")
         properties: dict[str, Any] = {
             "Name": {"title": [{"text": {"content": title}}]},
-            "Goal": {"relation": [{"id": goal_id}]},
+            "Goals": {"relation": [{"id": goal_id}]},
             "Status": {"select": {"name": "Pending"}},
         }
         if notes:
@@ -589,7 +493,7 @@ class NotionService:
         try:
             response = await self.client.databases.query(
                 database_id=self.db_ids["key_results"],
-                filter={"property": "Goal", "relation": {"contains": goal_id}},
+                filter={"property": "Goals", "relation": {"contains": goal_id}},
                 page_size=20,
             )
             return [_simplify_kr(page) for page in response["results"]]
@@ -622,7 +526,7 @@ class NotionService:
             page = await self.client.pages.update(page_id=kr_id, properties=properties)
             kr = _simplify_kr(page)
             if status is not None:
-                goal_id = _extract_relation_first(page.get("properties", {}), "Goal")
+                goal_id = _extract_relation_first(page.get("properties", {}), "Goals")
                 if goal_id:
                     await self._recalculate_goal_progress(goal_id)
             return kr
@@ -649,7 +553,7 @@ class NotionService:
                         },
                     }],
                 )
-            goal_id = _extract_relation_first(page.get("properties", {}), "Goal")
+            goal_id = _extract_relation_first(page.get("properties", {}), "Goals")
             if goal_id:
                 await self._recalculate_goal_progress(goal_id)
             return _simplify_kr(page)
@@ -692,7 +596,7 @@ def _simplify_task(page: dict) -> dict[str, Any]:
         "scheduled_date": _extract_date(props, "Scheduled Date"),
         "time_estimate": props.get("Time Estimate", {}).get("number"),
         "tags": _extract_multi_select(props, "Tags"),
-        "goal_id": _extract_relation_first(props, "Goal"),
+        "goal_id": _extract_relation_first(props, "Goals"),
         "url": page.get("url", ""),
     }
 

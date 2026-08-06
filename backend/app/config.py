@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     notion_tasks_db: str
     notion_notes_db: str
     notion_goals_db: str
-    notion_daily_agenda_db: str
+
     notion_key_results_db: str = ""
 
     # --- Firebase Auth (PWA) ---

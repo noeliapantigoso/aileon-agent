@@ -2,7 +2,7 @@
 name: plan-day
 description: Create a structured work plan for the day with calendar blocks
 triggers: [plan, organize, schedule, organiza, planea, mañana, tomorrow, day, día, semana, week, agenda, morning]
-schedule: "0 23 * * *"
+schedule: "0 1 * * *"
 job: planner.plan_day
 ---
 

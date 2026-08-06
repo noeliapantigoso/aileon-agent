@@ -306,9 +306,6 @@ class MemoryManager:
             pending = await self.notion.get_tasks(status="pending", limit=10)
             context["pending_tasks"] = pending
 
-            # Agenda del día
-            agenda = await self.notion.get_daily_agenda(today_str)
-            context["agenda"] = agenda
 
             # Metas activas (todos los tipos)
             try:

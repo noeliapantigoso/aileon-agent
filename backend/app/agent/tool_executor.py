@@ -65,7 +65,7 @@ class ToolExecutor:
         try:
             result = await handler(self, **args)
             # Invalidar cache de trabajo después de operaciones de escritura
-            if tool_name in ("create_task", "update_task", "save_daily_plan", "create_goal", "update_goal_progress", "update_goal", "archive_goal", "create_key_result", "update_key_result", "complete_key_result"):
+            if tool_name in ("create_task", "update_task", "create_goal", "update_goal_progress", "update_goal", "archive_goal", "create_key_result", "update_key_result", "complete_key_result"):
                 self.memory.invalidate_work_context_cache()
             return result
         except Exception as exc:
@@ -137,33 +137,7 @@ class ToolExecutor:
         result = await self.notion.update_task(task_id, **updates)
         return {"status": "updated", "task": result}
 
-    async def _save_note(
-        self,
-        content: str,
-        title: str | None = None,
-        tags: list[str] | None = None,
-        source: str | None = None,
-    ) -> dict[str, Any]:
-        if source is None:
-            source = "Voice" if self._source == "esp32" else "Text"
-        result = await self.notion.save_note(
-            content=content,
-            title=title,
-            tags=tags,
-            source=source.title(),
-        )
-        return {"status": "saved", "note": result}
 
-    async def _search_notes(self, query: str) -> dict[str, Any]:
-        notes = await self.notion.search_notes(query)
-        return {"notes": notes, "count": len(notes)}
-
-    async def _get_daily_agenda(
-        self,
-        date: str | None = None,
-    ) -> dict[str, Any]:
-        agenda = await self.notion.get_daily_agenda(date)
-        return {"agenda": agenda}
 
     async def _create_goal(
         self,
@@ -459,9 +433,7 @@ class ToolExecutor:
         "create_task": _create_task,
         "get_tasks": _get_tasks,
         "update_task": _update_task,
-        "save_note": _save_note,
-        "search_notes": _search_notes,
-        "get_daily_agenda": _get_daily_agenda,
+
         "create_goal": _create_goal,
         "get_goals": _get_goals,
         "update_goal_progress": _update_goal_progress,

@@ -57,5 +57,4 @@ class ContextResponse(BaseModel):
     """Contexto actual del usuario (agenda, tareas pendientes)."""
 
     today_tasks: list[dict] = Field(default_factory=list)
-    agenda: dict = Field(default_factory=dict)
     active_goals: list[dict] = Field(default_factory=list)

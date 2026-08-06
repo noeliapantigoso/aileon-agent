@@ -89,7 +89,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "tasks": settings.notion_tasks_db,
             "notes": settings.notion_notes_db,
             "goals": settings.notion_goals_db,
-            "daily_agenda": settings.notion_daily_agenda_db,
+
             "key_results": settings.notion_key_results_db,
         },
     )
@@ -450,12 +450,10 @@ async def get_context() -> ContextResponse:
     today_str = date.today().isoformat()
 
     today_tasks = await _notion_service.get_tasks(date=today_str)
-    agenda = await _notion_service.get_daily_agenda(today_str)
     goals = await _notion_service.get_goals(status="active")
 
     return ContextResponse(
         today_tasks=today_tasks,
-        agenda=agenda,
         active_goals=goals,
     )
 

@@ -2,7 +2,7 @@
 name: daily-review
 description: End-of-day review of what was completed — never assumes, always asks
 triggers: [review, cómo me fue, qué hice, cumplí, terminé, how did, end of day, cierre, fin del día, what did i, logré]
-schedule: "0 22 * * *"
+schedule: "0 0 * * *"
 job: planner.daily_review
 ---
 

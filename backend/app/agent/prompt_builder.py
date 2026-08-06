@@ -217,10 +217,6 @@ Reglas de comunicación:
                 line += f" ({priority})"
             agenda_lines.append(line)
 
-    agenda = today_context.get("agenda", {})
-    if agenda.get("exists"):
-        agenda_lines.append("\n### Plan del día: Ya existe un plan generado.")
-
     active_goals = today_context.get("active_goals", [])
     if active_goals:
         agenda_lines.append("\n### Metas activas (todos los tipos):")

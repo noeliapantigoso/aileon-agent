@@ -17,7 +17,7 @@ No hace falta tocar Cloud Scheduler.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -179,12 +179,13 @@ class TickHandler:
     async def _job_plan_day(self) -> dict[str, Any]:
         if self._planner is None:
             return {"error": "planner not initialized"}
-        result = await self._planner.plan_day()
+        target_date = self._now_lima().date().isoformat()
+        result = await self._planner.plan_day(target_date_iso=target_date)
         if self._telegram is not None:
             summary = result.get("summary", "")[:1500]
             if summary:
                 await self._telegram.send_proactive_message(
-                    f"📅 *Plan de mañana listo*\n\n{summary}"
+                    f"📅 *Plan de hoy listo*\n\n{summary}"
                 )
         return result
 
@@ -198,9 +199,9 @@ class TickHandler:
                 from datetime import timezone as _tz
                 from zoneinfo import ZoneInfo
                 tz = ZoneInfo(self._timezone)
-                today_local = self._now_lima().date()
+                today_local = self._now_lima().date() - timedelta(days=1)
                 day_start = datetime.combine(today_local, datetime.min.time()).replace(tzinfo=tz)
-                day_end = day_start + __import__("datetime").timedelta(days=1)
+                day_end = day_start + timedelta(days=1)
                 events = self._calendar.list_events(start=day_start, end=day_end)
                 plan_events = [e for e in events if "[plan]" in (e.get("summary") or "")]
                 if plan_events:
