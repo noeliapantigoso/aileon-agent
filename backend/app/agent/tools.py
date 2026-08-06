@@ -354,6 +354,36 @@ TOOLS = [
         },
     },
     {
+        "name": "update_key_result",
+        "description": (
+            "Edita un Key Result existente: cambia el título, las notas, o reabre uno "
+            "que estaba Done (status=pending). Si no tienes el kr_id, primero llama get_key_results."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kr_id": {
+                    "type": "string",
+                    "description": "ID del Key Result en Notion",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Nuevo título del KR",
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Nuevas notas o criterios de completitud",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "done"],
+                    "description": "Cambiar estado: 'pending' para reabrir, 'done' para cerrar",
+                },
+            },
+            "required": ["kr_id"],
+        },
+    },
+    {
         "name": "complete_key_result",
         "description": (
             "Marca un Key Result como Done y recalcula automáticamente el progreso de la meta. "

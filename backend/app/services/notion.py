@@ -597,6 +597,39 @@ class NotionService:
             logger.error("Notion get_key_results error: %s", exc)
             raise
 
+    async def update_key_result(
+        self,
+        kr_id: str,
+        title: Optional[str] = None,
+        notes: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Edita título, notas o status de un KR existente."""
+        properties: dict[str, Any] = {}
+        if title is not None:
+            properties["Name"] = {"title": [{"text": {"content": title}}]}
+        if notes is not None:
+            properties["Notes"] = {
+                "rich_text": [{"type": "text", "text": {"content": notes[:1900]}}]
+            }
+        if status is not None:
+            label = "Done" if status.lower() == "done" else "Pending"
+            properties["Status"] = {"select": {"name": label}}
+
+        if not properties:
+            return {"id": kr_id, "updated": False, "reason": "sin campos a actualizar"}
+        try:
+            page = await self.client.pages.update(page_id=kr_id, properties=properties)
+            kr = _simplify_kr(page)
+            if status is not None:
+                goal_id = _extract_relation_first(page.get("properties", {}), "Goal")
+                if goal_id:
+                    await self._recalculate_goal_progress(goal_id)
+            return kr
+        except APIResponseError as exc:
+            logger.error("Notion update_key_result error: %s", exc)
+            raise
+
     async def mark_kr_done(self, kr_id: str, note: str = "") -> dict[str, Any]:
         """Marca un KR como Done y recalcula el progreso de la meta."""
         properties: dict[str, Any] = {"Status": {"select": {"name": "Done"}}}

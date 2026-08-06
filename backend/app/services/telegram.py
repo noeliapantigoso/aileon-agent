@@ -114,7 +114,7 @@ class TelegramBot:
         await self._app.bot.set_webhook(
             url=url,
             secret_token=secret_token,
-            drop_pending_updates=True,
+            drop_pending_updates=False,
         )
         logger.info("Telegram webhook registered: %s", url)
 

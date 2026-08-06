@@ -65,7 +65,7 @@ class ToolExecutor:
         try:
             result = await handler(self, **args)
             # Invalidar cache de trabajo después de operaciones de escritura
-            if tool_name in ("create_task", "update_task", "save_daily_plan", "create_goal", "update_goal_progress", "update_goal", "archive_goal", "create_key_result", "complete_key_result"):
+            if tool_name in ("create_task", "update_task", "save_daily_plan", "create_goal", "update_goal_progress", "update_goal", "archive_goal", "create_key_result", "update_key_result", "complete_key_result"):
                 self.memory.invalidate_work_context_cache()
             return result
         except Exception as exc:
@@ -243,6 +243,16 @@ class ToolExecutor:
         krs = await self.notion.get_key_results(goal_id)
         done = sum(1 for kr in krs if kr.get("status") == "Done")
         return {"key_results": krs, "count": len(krs), "done": done, "pending": len(krs) - done}
+
+    async def _update_key_result(
+        self,
+        kr_id: str,
+        title: str | None = None,
+        notes: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        result = await self.notion.update_key_result(kr_id=kr_id, title=title, notes=notes, status=status)
+        return {"status": "updated", "key_result": result}
 
     async def _complete_key_result(self, kr_id: str, note: str = "") -> dict[str, Any]:
         result = await self.notion.mark_kr_done(kr_id=kr_id, note=note)
@@ -475,6 +485,7 @@ class ToolExecutor:
         "list_scheduled_tasks": _list_scheduled_tasks,
         "create_key_result": _create_key_result,
         "get_key_results": _get_key_results,
+        "update_key_result": _update_key_result,
         "complete_key_result": _complete_key_result,
     }
 
