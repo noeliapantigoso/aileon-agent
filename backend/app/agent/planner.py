@@ -1,15 +1,13 @@
 """
-PlannerAgent — subagente especializado en planificación de calendario.
+PlannerAgent — subagent specialised in calendar planning.
 
-Responsabilidades:
-1. Generar plan diario auto que llena el calendar respetando metas, experimentos,
-   tareas pendientes, energía, horas de productividad.
-2. Verificar cumplimiento de bloques pasados.
-3. Reprogramar bloques no cumplidos.
-4. Daily review nocturna.
-5. Priorización urgencia × importancia × probabilidad_cumplir.
+Responsibilities:
+1. Build the daily plan, filling the calendar while respecting goals,
+   experiments, pending tasks, energy levels and productivity hours.
+2. Apply targeted calendar edits (create / move / delete blocks).
+3. Run the end-of-day review and mark block completion.
 
-Loop propio de function calling con tools especializadas.
+It has its own function-calling loop with a specialised toolset.
 """
 
 from __future__ import annotations
@@ -34,19 +32,19 @@ MODEL_ID_AISTUDIO = "gemini-2.5-flash"
 PLANNER_TOOLS = [
     {
         "name": "list_calendar_events",
-        "description": "Lista eventos del Calendar en un rango (default próximas 24h).",
+        "description": "List calendar events in a range (defaults to the next 24h).",
         "parameters": {
             "type": "object",
             "properties": {
                 "start_iso": {"type": "string", "description": "ISO datetime con tz"},
                 "end_iso": {"type": "string", "description": "ISO datetime con tz"},
-                "days": {"type": "integer", "description": "Si no hay start/end, días desde ahora"},
+                "days": {"type": "integer", "description": "Days from now, when start/end are absent"},
             },
         },
     },
     {
         "name": "find_free_slots",
-        "description": "Encuentra huecos libres entre dos datetimes.",
+        "description": "Find free slots between two datetimes.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -60,13 +58,13 @@ PLANNER_TOOLS = [
     {
         "name": "create_block",
         "description": (
-            "Crea un bloque en Calendar. Usar para todos los bloques de planning del día. "
-            "Asociar a goal_id/experiment_id/task_id cuando aplique."
+            "Create a calendar block. Use for every planned block of the day. "
+            "Attach goal_id / experiment_id / task_id when applicable."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "summary": {"type": "string", "description": "Título corto del bloque"},
+                "summary": {"type": "string", "description": "Short block title"},
                 "start_iso": {"type": "string"},
                 "end_iso": {"type": "string"},
                 "description": {"type": "string"},
@@ -79,7 +77,7 @@ PLANNER_TOOLS = [
     },
     {
         "name": "update_block",
-        "description": "Mueve o modifica un bloque existente.",
+        "description": "Move or modify an existing block.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -94,7 +92,7 @@ PLANNER_TOOLS = [
     },
     {
         "name": "delete_block",
-        "description": "Borra un bloque del Calendar.",
+        "description": "Delete a calendar block.",
         "parameters": {
             "type": "object",
             "properties": {"event_id": {"type": "string"}},
@@ -103,7 +101,7 @@ PLANNER_TOOLS = [
     },
     {
         "name": "mark_block_completed",
-        "description": "Marca cumplimiento de un bloque pasado.",
+        "description": "Mark whether a past block was completed.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -119,7 +117,7 @@ PLANNER_TOOLS = [
     },
     {
         "name": "get_completion_history",
-        "description": "Estadísticas históricas de cumplimiento (por hora del día).",
+        "description": "Historical completion statistics, broken down by hour of day.",
         "parameters": {
             "type": "object",
             "properties": {"days": {"type": "integer", "description": "default 14"}},
@@ -127,22 +125,22 @@ PLANNER_TOOLS = [
     },
     {
         "name": "get_active_goals",
-        "description": "Lee metas activas con sus deadlines y progreso.",
+        "description": "Read active goals with their deadlines and progress.",
         "parameters": {"type": "object", "properties": {}},
     },
     {
         "name": "get_active_experiments",
-        "description": "Lee experimentos activos con sus cadencias.",
+        "description": "Read active experiments with their check-in cadence.",
         "parameters": {"type": "object", "properties": {}},
     },
     {
         "name": "get_pending_tasks",
-        "description": "Lee tareas pendientes de Notion sin agendar.",
+        "description": "Read pending Notion tasks that are not scheduled yet.",
         "parameters": {"type": "object", "properties": {}},
     },
     {
         "name": "log_experiment_progress",
-        "description": "Avanza progreso de un experimento (usar tras verificar cumplimiento).",
+        "description": "Log experiment progress (use after verifying completion).",
         "parameters": {
             "type": "object",
             "properties": {
@@ -155,7 +153,7 @@ PLANNER_TOOLS = [
     },
     {
         "name": "update_goal_progress",
-        "description": "Avanza % de una meta (usar tras completar bloque asociado).",
+        "description": "Advance a goal's percentage (use after completing a linked block).",
         "parameters": {
             "type": "object",
             "properties": {
@@ -169,8 +167,8 @@ PLANNER_TOOLS = [
     {
         "name": "get_key_results",
         "description": (
-            "Lee los Key Results de una meta para informar qué agendar. "
-            "Usar cuando se planea un día y se quiere saber qué KRs están pendientes."
+            "Read a goal's Key Results to inform what to schedule. "
+            "Use while planning a day to see which KRs are still pending."
         ),
         "parameters": {
             "type": "object",
@@ -183,8 +181,8 @@ PLANNER_TOOLS = [
     {
         "name": "mark_kr_done",
         "description": (
-            "Marca un KR como completado y recalcula el progreso de la meta. "
-            "Usar en el daily review cuando la evidencia indica que se alcanzó un KR."
+            "Mark a KR as completed and recalculate the goal's progress. "
+            "Use during the daily review when the evidence clearly shows a KR was met."
         ),
         "parameters": {
             "type": "object",
@@ -204,9 +202,9 @@ PLAN_DAY_PROMPT_TEMPLATE = """You are an expert time management planner. Your ro
 plan for the specified day in the user's Google Calendar, respecting goals, active experiments, \
 pending tasks, energy levels, and existing fixed events.
 
-IMPORTANT: All datetimes you generate must be in Lima time (America/Lima, UTC-5).
-Always use ISO format with explicit offset: 2024-05-20T09:00:00-05:00
-NEVER use the Z suffix or UTC for blocks you create.
+IMPORTANT: All datetimes you generate must be in the user's local timezone
+(shown in the context above). Always use ISO format with an explicit offset, e.g.
+2024-05-20T09:00:00-05:00. NEVER use the Z suffix or UTC for blocks you create.
 
 # Day to plan
 {target_date} ({day_name})
@@ -235,33 +233,25 @@ NEVER use the Z suffix or UTC for blocks you create.
 # Fixed events already in Calendar
 {fixed_events_summary}
 
+# User's stated priority for this day
+{day_priority}
+
 {skill_rules}
 
 Action: plan the day. Start now."""
 
 
-VERIFY_PROMPT_TEMPLATE = """You are a planner. Time to verify plan blocks that have already passed.
-
-# Current time
-{now_iso}
-
-# Plan blocks that passed in the last 3h
-{recent_blocks}
-
-{skill_rules}"""
-
-
 EDIT_REQUEST_PROMPT_TEMPLATE = """You are a planner. The user is requesting a specific change to their Calendar. \
 Your job is to validate coherence with their goals, peak hours, and patterns — then apply (or propose an alternative).
 
-IMPORTANT: All datetimes you generate must be in Lima time (America/Lima, UTC-5).
-Always use ISO format with explicit offset: 2024-05-20T09:00:00-05:00
-NEVER use the Z suffix or UTC for blocks you create or move.
+IMPORTANT: All datetimes you generate must be in the user's local timezone
+(shown in the context above). Always use ISO format with an explicit offset, e.g.
+2024-05-20T09:00:00-05:00. NEVER use the Z suffix or UTC.
 
 # User request (natural language)
 "{instruction}"
 
-# Current time (Lima, UTC-5)
+# Current time (user's local timezone)
 {now_iso}
 
 # Productivity profile
@@ -277,6 +267,11 @@ NEVER use the Z suffix or UTC for blocks you create or move.
 {experiments_summary}
 
 # Calendar events next 7 days
+Two lists. `bloques_del_plan_MOVIBLES` are blocks YOU created (they carry `[plan]`
+in the title): they are your own suggestions, not commitments — move, shorten or
+delete them freely to make room. `compromisos_fijos_NO_TOCAR` are her real
+commitments: never overwrite those.
+
 {upcoming_events}
 
 # Completion history (last 14 days)
@@ -288,11 +283,15 @@ NEVER use the Z suffix or UTC for blocks you create or move.
 3. If event_id is ambiguous, use `list_calendar_events` to find it by title/date.
 4. VALIDATE before applying:
    - Does the proposed time fall in low_energy_hours and is it deep work? → warn and suggest peak hours
-   - Does it conflict with an existing fixed event? → suggest nearby free slot with `find_free_slots`
+   - Does it overlap a `[plan]` block? → that is NOT a conflict. Those are yours:
+     move them, shorten them or delete them to make room, and say what you moved.
+   - Does it overlap a fixed commitment (no `[plan]` in the title)? → real conflict:
+     suggest a nearby free slot with `find_free_slots` and do not overwrite it.
    - Does it remove the only block dedicated to an active goal? → warn before deleting
    - Is that time repeatedly low in completion history? → mention and suggest alternative
 5. If validation OK, execute with `create_block`/`update_block`/`delete_block`.
-6. If there's a conflict, DO NOT apply — return an alternative proposal for the user to decide.
+6. Only a clash with a FIXED commitment stops you. Never refuse a change because
+   your own plan blocks are in the way — reorganising them is exactly your job.
 
 # Expected response
 Short text (2-4 sentences) explaining what you did or propose. \
@@ -315,7 +314,7 @@ DAILY_REVIEW_PROMPT_TEMPLATE = """You are a planner. End of day — daily review
 
 
 class PlannerAgent:
-    """Subagente de planificación con loop function calling propio."""
+    """Planning subagent with its own function-calling loop."""
 
     def __init__(
         self,
@@ -364,7 +363,7 @@ class PlannerAgent:
     # ── API pública (llamada desde main agent / endpoints) ─────────────────
 
     async def plan_day(self, target_date_iso: str | None = None) -> dict[str, Any]:
-        """Genera plan para un día (default mañana)."""
+        """Generate the plan for a day (defaults to tomorrow)."""
         if target_date_iso:
             target = date.fromisoformat(target_date_iso)
         else:
@@ -373,7 +372,7 @@ class PlannerAgent:
         ctx = await self._build_planning_context(target)
         prompt = PLAN_DAY_PROMPT_TEMPLATE.format(
             target_date=target.isoformat(),
-            day_name=_day_name_es(target),
+            day_name=target.strftime('%A'),
             user_profile_summary=ctx["profile_summary"],
             personality_summary=ctx["personality_summary"],
             insights_summary=ctx["insights_summary"],
@@ -382,40 +381,20 @@ class PlannerAgent:
             experiments_summary=ctx["experiments_summary"],
             pending_tasks_summary=ctx["pending_tasks_summary"],
             fixed_events_summary=ctx["fixed_events_summary"],
+            day_priority=ctx["day_priority"],
             skill_rules=self._load_skill_rules("plan-day"),
         )
 
         return await self._run_loop(prompt, mode="plan")
 
     def _now_lima(self) -> datetime:
-        """Hora actual en Lima (UTC-5)."""
+        """Current time in the user's timezone."""
         try:
             from zoneinfo import ZoneInfo
             return datetime.now(ZoneInfo(self._timezone))
         except Exception:
             from datetime import timezone as _tz, timedelta as _td
             return datetime.now(_tz(_td(hours=-5)))
-
-    async def verify_recent(self) -> dict[str, Any]:
-        """Verifica bloques pasados en últimas ~3h."""
-        from datetime import timezone
-        now_utc = datetime.now(timezone.utc)
-        start = now_utc - timedelta(hours=3)
-        events = self._calendar.list_events(start=start, end=now_utc)
-        plan_events = [
-            e for e in events
-            if "[plan]" in (e.get("summary") or "")
-        ]
-        if not plan_events:
-            return {"ok": True, "verified": 0, "reason": "no plan events in window"}
-
-        now_lima = self._now_lima()
-        prompt = VERIFY_PROMPT_TEMPLATE.format(
-            now_iso=now_lima.isoformat(),
-            recent_blocks=json.dumps(plan_events, ensure_ascii=False, indent=2),
-            skill_rules=self._load_skill_rules("verify-blocks"),
-        )
-        return await self._run_loop(prompt, mode="verify")
 
     async def edit_request(self, instruction: str) -> dict[str, Any]:
         """Aplica cambio puntual al Calendar validando coherencia."""
@@ -426,11 +405,23 @@ class PlannerAgent:
 
         ctx = await self._build_planning_context(today + timedelta(days=1))
 
-        upcoming = self._calendar.list_events(
+        # Separate the blocks the planner created from the user's real
+        # commitments. Without this distinction, edit_request treated its own
+        # `[plan]` blocks as immovable conflicts and blocked itself: it could
+        # not reorganise a day it had built in the first place.
+        todos = self._calendar.list_events(
             start=now_utc,
             end=now_utc + timedelta(days=7),
             max_results=50,
         )
+        upcoming = {
+            "bloques_del_plan_MOVIBLES": [
+                e for e in todos if "[plan]" in (e.get("summary") or "")
+            ],
+            "compromisos_fijos_NO_TOCAR": [
+                e for e in todos if "[plan]" not in (e.get("summary") or "")
+            ],
+        }
         completion = self._calendar.get_completion_history(days=14)
 
         prompt = EDIT_REQUEST_PROMPT_TEMPLATE.format(
@@ -447,7 +438,7 @@ class PlannerAgent:
         return await self._run_loop(prompt, mode="edit")
 
     async def daily_review(self, day_iso: str | None = None, user_input: str = "") -> dict[str, Any]:
-        """Review del día. Default: hoy."""
+        """End-of-day review. Defaults to today."""
         from zoneinfo import ZoneInfo
         day = date.fromisoformat(day_iso) if day_iso else date.today()
         start = datetime.combine(day, datetime.min.time()).replace(tzinfo=ZoneInfo(self._timezone))
@@ -457,7 +448,7 @@ class PlannerAgent:
         plan_events = [e for e in events if "[plan]" in (e.get("summary") or "")]
         stats = self._calendar.get_completion_history(days=1)
 
-        user_input_text = user_input.strip() if user_input.strip() else "(el usuario no respondió — asumir todo no cumplido)"
+        user_input_text = user_input.strip() if user_input.strip() else "(the user did not answer — leave every block unverified)"
 
         prompt = DAILY_REVIEW_PROMPT_TEMPLATE.format(
             today_blocks=json.dumps(plan_events, ensure_ascii=False, indent=2),
@@ -473,36 +464,20 @@ class PlannerAgent:
         from datetime import timezone
         from zoneinfo import ZoneInfo
 
-        # Perfil
-        profile = await self._memory._get_user_profile() if self._memory else {}
-        productivity = profile.get("productivity", {}) if isinstance(profile, dict) else {}
-        cal = productivity.get("estimation_calibration", 1.0)
+        # Who the user is no longer gets assembled here: it arrives through the
+        # shared system_instruction (build_user_context). Only planning-specific
+        # context is built below.
+        calibration = self._memory.get_calibration() if self._memory else {}
+        cal = calibration.get("estimation_calibration", 1.0)
         if cal > 1.05:
-            cal_note = f"⚠️ Calibración temporal: usuario subestima {int((cal - 1) * 100)}% — multiplica time_estimate × {cal}"
+            cal_note = f"⚠️ Time calibration: the user underestimates by {int((cal - 1) * 100)}% — multiply time_estimate by {cal}"
         elif cal < 0.95:
-            cal_note = f"ℹ️ Calibración temporal: usuario sobreestima {int((1 - cal) * 100)}% — multiplica time_estimate × {cal}"
+            cal_note = f"ℹ️ Time calibration: the user overestimates by {int((1 - cal) * 100)}% — multiply time_estimate by {cal}"
         else:
-            cal_note = "Calibración temporal: estimaciones precisas (factor 1.0)"
+            cal_note = "Time calibration: estimates are accurate (factor 1.0)"
 
-        profile_summary = (
-            f"Nombre: {profile.get('name', 'usuario')}\n"
-            f"Ocupación: {profile.get('occupation', '')}\n"
-            f"Peak hours: {productivity.get('peak_hours', '')}\n"
-            f"Low energy: {productivity.get('low_energy_hours', '')}\n"
-            f"Work start/end: {productivity.get('work_start', '')} - {productivity.get('work_end', '')}\n"
-            f"Focus block preferido: {productivity.get('preferred_focus_block_minutes', 90)}min\n"
-            f"{cal_note}"
-        )
-
-        # Personalidad
-        enneagram = (profile.get("personality") or {}).get("enneagram") if isinstance(profile, dict) else None
-        if enneagram:
-            personality_summary = (
-                f"Eneagrama Tipo {enneagram.get('type')} ({enneagram.get('name')}). "
-                f"Trampas comunes: {', '.join(enneagram.get('common_traps', []))}"
-            )
-        else:
-            personality_summary = "No disponible"
+        profile_summary = cal_note
+        personality_summary = "(see the profile in the system prompt)"
 
         # Insights
         insights = self._memory.insights.get_active_insights(limit=5) if self._memory and self._memory.insights else []
@@ -549,6 +524,15 @@ class PlannerAgent:
             for e in fixed_events
         ) or "(ninguno)"
 
+        # Priority saved by user the day before
+        day_priority = ""
+        if self._memory:
+            raw = self._memory.get_day_priority(target_date.isoformat())
+            if raw:
+                day_priority = f"The user said their priority for this day is: {raw}"
+            else:
+                day_priority = "(no priority set by user for this day)"
+
         return {
             "profile_summary": profile_summary,
             "personality_summary": personality_summary,
@@ -558,12 +542,45 @@ class PlannerAgent:
             "experiments_summary": experiments_summary,
             "pending_tasks_summary": pending_tasks_summary,
             "fixed_events_summary": fixed_events_summary,
+            "day_priority": day_priority,
         }
 
     # ── Loop ────────────────────────────────────────────────────────────────
 
+    async def _user_context(self) -> str:
+        """
+        User context shared with the chat agent.
+
+        Passed as system_instruction on every planner call, so any new kind of
+        fact about the user reaches it without being wired into each template.
+        """
+        if self._memory is None:
+            return ""
+        try:
+            from app.agent.prompt_builder import build_user_context
+
+            memories = [m.get("text", "") for m in await self._memory.list_memories()]
+            insights = (
+                self._memory.insights.get_active_insights(limit=5)
+                if self._memory.insights
+                else []
+            )
+            return build_user_context(
+                user_profile={
+                    "entries": self._memory.get_profile_entries(),
+                    "calibration": self._memory.get_calibration(),
+                },
+                current_datetime=self._now_lima(),
+                relevant_memories=[m for m in memories if m],
+                active_insights=insights,
+            )
+        except Exception as exc:
+            logger.warning("Planner: could not build user context: %s", exc)
+            return ""
+
     async def _run_loop(self, user_prompt: str, mode: str = "plan") -> dict[str, Any]:
-        """Loop function calling. Devuelve dict con summary y acciones."""
+        """Function-calling loop. Returns a dict with the summary and the actions."""
+        user_context = await self._user_context()
         gemini_tools = [types.Tool(function_declarations=PLANNER_TOOLS)]
         contents = [
             types.Content(
@@ -576,18 +593,41 @@ class PlannerAgent:
 
         for iteration in range(MAX_TOOL_ITERATIONS):
             logger.info("Planner iter %d/%d (mode=%s)", iteration + 1, MAX_TOOL_ITERATIONS, mode)
-            response = self._client.models.generate_content(
+            from app.agent.core import generate_with_retry
+
+            response = await generate_with_retry(
+                self._client,
                 model=self._model_id,
                 contents=contents,
                 config=types.GenerateContentConfig(
+                    system_instruction=user_context or None,
                     tools=gemini_tools,
                     temperature=0.4,
                     max_output_tokens=4096,
                 ),
             )
 
-            candidate = response.candidates[0]
-            parts = candidate.content.parts
+            # Gemini can return a candidate with no content (safety filter, token
+            # cutoff, empty turn): .parts comes back as None and cannot be iterated.
+            candidates = response.candidates or []
+            candidate = candidates[0] if candidates else None
+            parts = (
+                (candidate.content.parts if candidate and candidate.content else None)
+                or []
+            )
+
+            if not parts:
+                logger.warning(
+                    "Planner: empty response from Gemini (iteration %d, finish_reason=%s)",
+                    iteration + 1,
+                    getattr(candidate, "finish_reason", None) if candidate else None,
+                )
+                final_text = (
+                    "The planner got no response from the model on this attempt. "
+                    "No blocks were created."
+                )
+                break
+
             has_calls = any(p.function_call is not None for p in parts)
 
             if not has_calls:
@@ -739,8 +779,6 @@ class PlannerAgent:
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 
-def _day_name_es(d) -> str:
-    return ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"][d.weekday()]
 
 
 def _clean_block_title(summary: str) -> str:

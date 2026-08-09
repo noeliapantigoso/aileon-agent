@@ -1,17 +1,17 @@
 """
-TickHandler — ejecutor del ciclo horario.
+TickHandler — the hourly cycle runner.
 
-Reemplaza múltiples jobs de Cloud Scheduler con un solo endpoint /api/v1/tick
-que se despierta cada hora y decide qué ejecutar basándose en:
+Replaces many Cloud Scheduler jobs with a single /api/v1/tick endpoint that wakes
+up every hour and decides what to run based on:
 
-  1. Skills con campo `schedule` (cron expression) en su frontmatter
-     → corre el job mapeado en el campo `job` cuando el cron coincide con la hora actual
+  1. Skills with a `schedule` (cron expression) in their frontmatter
+     -> runs the handler named in their `job` field when the cron matches
 
-  2. Cola Firestore de tareas one-time (assistant_scheduled_tasks)
-     → ejecuta tareas cuyo run_at <= ahora
+  2. The Firestore queue of one-time agent reminders
+     -> runs anything whose run_at is already due
 
-Agregar un nuevo job agendado = crear/editar un skill con `schedule` y `job`.
-No hace falta tocar Cloud Scheduler.
+Adding a scheduled job = creating or editing a skill with `schedule` and `job`.
+Cloud Scheduler never has to be touched.
 """
 
 from __future__ import annotations
@@ -74,6 +74,41 @@ def cron_matches_now(schedule: str, now: datetime) -> bool:
         return False
 
 
+def _format_actions(actions: Any) -> str:
+    """
+    Summarise the tools a job ran, for the activity log.
+
+    Returns something like:
+        tools: create_block x3, list_calendar_events x2
+        blocks: 09:00 Literature review | 15:00 Launch ads
+    """
+    if not actions or not isinstance(actions, list):
+        return ""
+
+    counts: dict[str, int] = {}
+    blocks: list[str] = []
+    for a in actions:
+        if not isinstance(a, dict):
+            continue
+        name = a.get("tool", "?")
+        counts[name] = counts.get(name, 0) + 1
+        if name == "create_block":
+            args = a.get("args") or {}
+            start = str(args.get("start_iso", ""))
+            hhmm = start[11:16] if len(start) >= 16 else ""
+            title = str(args.get("title", ""))[:40]
+            if title:
+                blocks.append(f"{hhmm} {title}".strip())
+
+    if not counts:
+        return ""
+
+    out = "\ntools: " + ", ".join(f"{k} x{v}" for k, v in counts.items())
+    if blocks:
+        out += "\nblocks: " + " | ".join(blocks[:8])
+    return out
+
+
 # ── TickHandler ───────────────────────────────────────────────────────────────
 
 class TickHandler:
@@ -83,7 +118,6 @@ class TickHandler:
     Built-in job mapping (skill.job field → method):
       planner.plan_day       → planner.plan_day()
       planner.daily_review   → planner daily review flow (asks user via Telegram)
-      planner.verify_recent  → planner.verify_recent()
       proactive.run_cycle    → proactive.run_cycle(current_hour_local=hour)
       insights.weekly_analysis → insights.run_weekly_analysis()
 
@@ -97,7 +131,7 @@ class TickHandler:
         proactive: Any = None,
         insights: Any = None,
         agent: Any = None,
-        task_scheduler: Any = None,
+        agent_queue: Any = None,
         telegram_bot: Any = None,
         calendar_service: Any = None,
         user_timezone: str = "America/Lima",
@@ -107,7 +141,7 @@ class TickHandler:
         self._proactive = proactive
         self._insights = insights
         self._agent = agent
-        self._task_scheduler = task_scheduler
+        self._agent_queue = agent_queue
         self._telegram = telegram_bot
         self._calendar = calendar_service
         self._timezone = user_timezone
@@ -127,7 +161,7 @@ class TickHandler:
         logger.info("Tick running at %s (hour=%d)", now.isoformat(), now.hour)
         results = []
 
-        # 1. Cron skills
+        # 1. Cron-scheduled skills
         skills = self._skills.load_all()
         for skill in skills:
             schedule = skill.get("schedule")
@@ -137,17 +171,36 @@ class TickHandler:
                 logger.info("Cron match: skill '%s' (schedule=%s)", skill["name"], schedule)
                 result = await self._execute_skill_job(skill, now)
                 results.append({"source": "cron", "skill": skill["name"], "result": result})
+                # proactive.run_cycle writes its own, more detailed log entry
+                if skill.get("job") != "proactive.run_cycle":
+                    await self._log(
+                        f"⏰ {now.hour}:00 — {skill['name']}"
+                        + _format_actions(result.get("actions"))
+                        + (f"\nerror: {result['error']}" if result.get("error") else "")
+                    )
 
-        # 2. One-time queue
-        if self._task_scheduler is not None:
-            due = self._task_scheduler.get_due_tasks(now)
+        # 2. One-time reminder queue
+        if self._agent_queue is not None:
+            due = self._agent_queue.get_due_tasks(now)
             for task in due:
                 logger.info("Due task: '%s' (id=%s)", task.get("title"), task.get("id"))
                 result = await self._execute_queued_task(task)
-                self._task_scheduler.mark_done(task["id"])
+                self._agent_queue.mark_done(task["id"])
                 results.append({"source": "queue", "task": task.get("title"), "result": result})
+                await self._log(
+                    f"⏰ {now.hour}:00 — ran reminder '{task.get('title')}'"
+                )
 
         return {"ok": True, "hour": now.hour, "ran": len(results), "results": results}
+
+    async def _log(self, text: str) -> None:
+        """Write to the activity log, if configured."""
+        if self._telegram is None:
+            return
+        try:
+            await self._telegram.send_log_message(text)
+        except Exception:
+            pass
 
     # ── Job execution ─────────────────────────────────────────────────────────
 
@@ -158,10 +211,6 @@ class TickHandler:
                 return await self._job_plan_day()
             if job == "planner.daily_review":
                 return await self._job_daily_review()
-            if job == "planner.verify_recent":
-                if self._planner is None:
-                    return {"error": "planner not initialized"}
-                return await self._planner.verify_recent()
             if job == "proactive.run_cycle":
                 if self._proactive is None:
                     return {"error": "proactive not initialized"}
@@ -185,7 +234,7 @@ class TickHandler:
             summary = result.get("summary", "")[:1500]
             if summary:
                 await self._telegram.send_proactive_message(
-                    f"📅 *Plan de hoy listo*\n\n{summary}"
+                    f"📅 *Today's plan is ready*\n\n{summary}"
                 )
         return result
 

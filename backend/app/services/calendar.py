@@ -1,16 +1,16 @@
 """
-Servicio de Google Calendar.
+Google Calendar service.
 
-Carga credenciales OAuth desde Secret Manager (Cloud Run) o file local (dev).
-Wrapper con métodos para list/create/update/delete events + utilidades de
-free-slot finding y tracking de cumplimiento.
+Loads OAuth credentials from Secret Manager (Cloud Run) or a local file (dev).
+Wraps list/create/update/delete events plus free-slot finding and completion
+tracking.
 
-Convención de events del planner:
-- summary: prefijo "[plan]" para distinguirlos de eventos manuales
-- extendedProperties.private.experiment_id: si el bloque es de un experimento
-- extendedProperties.private.goal_id: si el bloque avanza una meta
-- extendedProperties.private.task_id: si el bloque es una tarea Notion
-- extendedProperties.private.completed: "true"|"false"|"partial" tras verificación
+Convention for planner-created events:
+- summary: prefixed with "[plan]" to tell them apart from manual events
+- extendedProperties.private.experiment_id: the block belongs to an experiment
+- extendedProperties.private.goal_id: the block advances a goal
+- extendedProperties.private.task_id: the block is a Notion task
+- extendedProperties.private.completed: "true"|"false"|"partial" once verified
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ PLAN_PREFIX = "[plan]"
 
 
 class CalendarService:
-    """Wrapper Google Calendar API + utilidades de planning."""
+    """Google Calendar API wrapper plus planning helpers."""
 
     def __init__(
         self,
@@ -46,7 +46,7 @@ class CalendarService:
         self._service = None
 
     def _build_service(self):
-        """Construye el cliente Calendar con auto-refresh del token."""
+        """Build the Calendar client, refreshing the token when needed."""
         if self._service is not None:
             return self._service
 
@@ -55,7 +55,7 @@ class CalendarService:
         from googleapiclient.discovery import build
 
         if self._token_json is None:
-            raise RuntimeError("No OAuth token disponible para Calendar")
+            raise RuntimeError("No OAuth token available for Calendar")
 
         token_data = (
             json.loads(self._token_json) if isinstance(self._token_json, str)
@@ -66,7 +66,7 @@ class CalendarService:
             if creds.expired and creds.refresh_token:
                 creds.refresh(Request())
             else:
-                raise RuntimeError("OAuth creds expiradas y sin refresh_token")
+                raise RuntimeError("OAuth credentials expired with no refresh_token")
 
         self._service = build("calendar", "v3", credentials=creds, cache_discovery=False)
         return self._service
@@ -80,7 +80,7 @@ class CalendarService:
         days: int = 7,
         max_results: int = 100,
     ) -> list[dict[str, Any]]:
-        """Lista eventos en rango."""
+        """List events in a range."""
         svc = self._build_service()
         now = datetime.now(timezone.utc)
         t_min = (start or now).isoformat()
@@ -109,7 +109,7 @@ class CalendarService:
         end: datetime,
         min_duration_minutes: int = 30,
     ) -> list[tuple[datetime, datetime]]:
-        """Encuentra huecos libres entre dos datetimes."""
+        """Find free slots between two datetimes."""
         events = self.list_events(start=start, end=end)
         busy: list[tuple[datetime, datetime]] = []
         for e in events:
@@ -204,7 +204,7 @@ class CalendarService:
         completed: str = "true",
         note: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Marca cumplimiento usando extendedProperties + emoji en title."""
+        """Record completion using extendedProperties plus an emoji in the title."""
         svc = self._build_service()
         event = svc.events().get(calendarId=self._calendar_id, eventId=event_id).execute()
 
@@ -275,7 +275,7 @@ class CalendarService:
 
 
 def _simplify_event(event: dict) -> dict[str, Any]:
-    """Devuelve dict simplificado de un event Calendar."""
+    """Return a simplified dict for a Calendar event."""
     priv = event.get("extendedProperties", {}).get("private", {}) or {}
     return {
         "id": event.get("id"),
@@ -305,7 +305,7 @@ def load_calendar_token_from_secret(
     project_id: str,
     secret_name: str = "google-calendar-token",
 ) -> Optional[str]:
-    """Lee token de Secret Manager. Devuelve JSON string."""
+    """Read the token from Secret Manager. Returns a JSON string."""
     try:
         from google.cloud import secretmanager
         client = secretmanager.SecretManagerServiceClient()

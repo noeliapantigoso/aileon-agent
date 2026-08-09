@@ -1,8 +1,8 @@
 """
-Capa de abstracción sobre la Notion API.
+Abstraction layer over the Notion API.
 
-Usa notion-client Python SDK con Internal Integration Token.
-Cada método retorna diccionarios SIMPLIFICADOS para reducir tokens del LLM.
+Uses the notion-client Python SDK with an internal integration token.
+Every method returns SIMPLIFIED dicts to keep the model's token cost down.
 """
 
 from __future__ import annotations
@@ -18,14 +18,14 @@ logger = logging.getLogger(__name__)
 
 
 class NotionService:
-    """Wrapper completo para la Notion API."""
+    """Full wrapper for the Notion API."""
 
     def __init__(self, token: str, db_ids: dict[str, str]) -> None:
         """
         Args:
             token: Notion Internal Integration Token.
-            db_ids: Mapping de nombres a database IDs.
-                    Keys: "tasks", "notes", "goals", "daily_agenda"
+            db_ids: Mapping of names to Notion database ids.
+                    Keys: "tasks", "notes", "goals", "key_results"
         """
         self.client = AsyncClient(auth=token)
         self.db_ids = db_ids
@@ -39,12 +39,11 @@ class NotionService:
         due_date: Optional[str] = None,
         scheduled_date: Optional[str] = None,
         time_estimate_minutes: Optional[int] = None,
-        project: Optional[str] = None,
         tags: Optional[list[str]] = None,
         source: str = "Voice",
         goal_id: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Crea una nueva tarea en la database de Tasks."""
+        """Create a new task in the Tasks database."""
         properties: dict[str, Any] = {
             "Name": {"title": [{"text": {"content": title}}]},
             "Status": {"select": {"name": "Inbox"}},
@@ -79,10 +78,9 @@ class NotionService:
         status: Optional[str] = None,
         date: Optional[str] = None,
         priority: Optional[str] = None,
-        project: Optional[str] = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        """Consulta tareas con filtros opcionales."""
+        """Query tasks with optional filters."""
         filters: list[dict] = []
 
         status_map = {
@@ -137,7 +135,7 @@ class NotionService:
             raise
 
     async def get_task(self, task_id: str) -> dict[str, Any] | None:
-        """Lee una tarea por id (page id)."""
+        """Read one task by page id."""
         try:
             page = await self.client.pages.retrieve(page_id=task_id)
             return _simplify_task(page)
@@ -146,24 +144,45 @@ class NotionService:
             return None
 
     async def update_task(self, task_id: str, **updates: Any) -> dict[str, Any]:
-        """Actualiza propiedades de una tarea existente."""
+        """
+        Update the properties of an existing task.
+
+        Covers every editable column of the Tasks database, so any field set
+        wrongly at creation time can be corrected later.
+        """
         properties: dict[str, Any] = {}
 
         field_map = {
+            "title": ("Name", "title"),
             "status": ("Status", "select"),
             "priority": ("Priority", "select"),
             "due_date": ("Due Date", "date"),
             "scheduled_date": ("Scheduled Date", "date"),
+            "time_estimate_minutes": ("Time Estimate", "number"),
+            "tags": ("Tags", "multi_select"),
+            "goal_id": ("Goals", "relation"),
         }
 
         for key, value in updates.items():
-            if key in field_map and value is not None:
-                prop_name, prop_type = field_map[key]
-                if prop_type == "select":
-                    name = value.replace("_", " ").title() if key == "status" else value.upper()
-                    properties[prop_name] = {"select": {"name": name}}
-                elif prop_type == "date":
-                    properties[prop_name] = {"date": {"start": value}}
+            if key not in field_map or value is None:
+                continue
+            prop_name, prop_type = field_map[key]
+            if prop_type == "title":
+                properties[prop_name] = {"title": [{"text": {"content": value}}]}
+            elif prop_type == "select":
+                name = value.replace("_", " ").title() if key == "status" else value.upper()
+                properties[prop_name] = {"select": {"name": name}}
+            elif prop_type == "date":
+                properties[prop_name] = {"date": {"start": value}}
+            elif prop_type == "number":
+                properties[prop_name] = {"number": value}
+            elif prop_type == "multi_select":
+                properties[prop_name] = {"multi_select": [{"name": t} for t in value]}
+            elif prop_type == "relation":
+                properties[prop_name] = {"relation": [{"id": value}]}
+
+        if not properties:
+            return {"id": task_id, "updated": False, "reason": "no fields to update"}
 
         try:
             page = await self.client.pages.update(
@@ -173,6 +192,15 @@ class NotionService:
             return _simplify_task(page)
         except APIResponseError as exc:
             logger.error("Notion update_task error: %s", exc)
+            raise
+
+    async def archive_task(self, task_id: str) -> dict[str, Any]:
+        """Archive (soft-delete) a task."""
+        try:
+            await self.client.pages.update(page_id=task_id, archived=True)
+            return {"id": task_id, "archived": True}
+        except APIResponseError as exc:
+            logger.error("Notion archive_task error: %s", exc)
             raise
 
     # ── Notes ────────────────────────────────────────────────────────────────
@@ -185,7 +213,7 @@ class NotionService:
         source: str = "Voice",
         audio_url: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Guarda una nota en la database de Notes."""
+        """Save a note to the Notes database."""
         if not title:
             title = content[:50] + ("..." if len(content) > 50 else "")
 
@@ -221,7 +249,7 @@ class NotionService:
             raise
 
     async def search_notes(self, query: str) -> list[dict[str, Any]]:
-        """Busca notas por texto usando la Notion Search API."""
+        """Search notes by text using the Notion Search API."""
         try:
             response = await self.client.search(
                 query=query,
@@ -256,7 +284,7 @@ class NotionService:
         key_results: Optional[str] = None,
         initial_progress: int = 0,
     ) -> dict[str, Any]:
-        """Crea una nueva meta en Notion DB Goals."""
+        """Create a new goal in the Goals database."""
         type_map = {
             "short_term": "Short Term",
             "medium_term": "Medium Term",
@@ -384,7 +412,7 @@ class NotionService:
             properties["Status"] = {"select": {"name": status.title()}}
 
         if not properties:
-            return {"id": goal_id, "updated": False, "reason": "sin campos a actualizar"}
+            return {"id": goal_id, "updated": False, "reason": "no fields to update"}
 
         try:
             page = await self.client.pages.update(
@@ -397,7 +425,7 @@ class NotionService:
             raise
 
     async def archive_goal(self, goal_id: str) -> dict[str, Any]:
-        """Archiva (soft-delete) una meta."""
+        """Archive (soft-delete) a goal."""
         try:
             await self.client.pages.update(page_id=goal_id, archived=True)
             return {"id": goal_id, "archived": True}
@@ -411,21 +439,21 @@ class NotionService:
         progress_note: str,
         new_percentage: Optional[int] = None,
     ) -> dict[str, Any]:
-        """Actualiza el progreso de una meta."""
+        """Update a goal's progress."""
         properties: dict[str, Any] = {}
 
         if new_percentage is not None:
             properties["Progress"] = {"number": new_percentage / 100.0}
 
         try:
-            # Actualizar propiedades si hay cambios
+            # Update properties when there are changes
             if properties:
                 await self.client.pages.update(
                     page_id=goal_id,
                     properties=properties,
                 )
 
-            # Agregar nota de progreso como bloque
+            # Append the progress note as a block
             await self.client.blocks.children.append(
                 block_id=goal_id,
                 children=[
@@ -464,7 +492,7 @@ class NotionService:
         title: str,
         notes: str = "",
     ) -> dict[str, Any]:
-        """Crea un Key Result vinculado a una meta."""
+        """Create a Key Result linked to a goal."""
         if not self.db_ids.get("key_results"):
             raise ValueError("Key Results database not configured (NOTION_KEY_RESULTS_DB)")
         properties: dict[str, Any] = {
@@ -486,19 +514,45 @@ class NotionService:
             logger.error("Notion create_key_result error: %s", exc)
             raise
 
-    async def get_key_results(self, goal_id: str) -> list[dict[str, Any]]:
-        """Lista los KRs de una meta."""
+    async def get_key_results(
+        self,
+        goal_id: Optional[str] = None,
+        unassigned_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        """
+        List Key Results.
+
+        Args:
+            goal_id: When given, only that goal's KRs.
+            unassigned_only: When True, only the orphan KRs with no goal
+                assigned. Takes precedence over goal_id.
+        """
         if not self.db_ids.get("key_results"):
             return []
+
+        query: dict[str, Any] = {
+            "database_id": self.db_ids["key_results"],
+            "page_size": 100,
+        }
+        if unassigned_only:
+            query["filter"] = {"property": "Goals", "relation": {"is_empty": True}}
+        elif goal_id:
+            query["filter"] = {"property": "Goals", "relation": {"contains": goal_id}}
+
         try:
-            response = await self.client.databases.query(
-                database_id=self.db_ids["key_results"],
-                filter={"property": "Goals", "relation": {"contains": goal_id}},
-                page_size=20,
-            )
+            response = await self.client.databases.query(**query)
             return [_simplify_kr(page) for page in response["results"]]
         except APIResponseError as exc:
             logger.error("Notion get_key_results error: %s", exc)
+            raise
+
+    async def archive_key_result(self, kr_id: str) -> dict[str, Any]:
+        """Archive (soft-delete) a Key Result."""
+        try:
+            await self.client.pages.update(page_id=kr_id, archived=True)
+            return {"id": kr_id, "archived": True}
+        except APIResponseError as exc:
+            logger.error("Notion archive_key_result error: %s", exc)
             raise
 
     async def update_key_result(
@@ -507,9 +561,12 @@ class NotionService:
         title: Optional[str] = None,
         notes: Optional[str] = None,
         status: Optional[str] = None,
+        goal_id: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Edita título, notas o status de un KR existente."""
+        """Edit an existing KR's title, notes, status or assigned goal."""
         properties: dict[str, Any] = {}
+        if goal_id is not None:
+            properties["Goals"] = {"relation": [{"id": goal_id}]}
         if title is not None:
             properties["Name"] = {"title": [{"text": {"content": title}}]}
         if notes is not None:
@@ -521,7 +578,7 @@ class NotionService:
             properties["Status"] = {"select": {"name": label}}
 
         if not properties:
-            return {"id": kr_id, "updated": False, "reason": "sin campos a actualizar"}
+            return {"id": kr_id, "updated": False, "reason": "no fields to update"}
         try:
             page = await self.client.pages.update(page_id=kr_id, properties=properties)
             kr = _simplify_kr(page)
@@ -535,7 +592,7 @@ class NotionService:
             raise
 
     async def mark_kr_done(self, kr_id: str, note: str = "") -> dict[str, Any]:
-        """Marca un KR como Done y recalcula el progreso de la meta."""
+        """Mark a KR as Done and recalculate the goal's progress."""
         properties: dict[str, Any] = {"Status": {"select": {"name": "Done"}}}
         try:
             page = await self.client.pages.update(page_id=kr_id, properties=properties)
@@ -562,7 +619,7 @@ class NotionService:
             raise
 
     async def _recalculate_goal_progress(self, goal_id: str) -> None:
-        """Recalcula el progreso de una meta como fracción de KRs completados."""
+        """Recalculate a goal's progress as the fraction of completed KRs."""
         krs = await self.get_key_results(goal_id)
         if not krs:
             return
@@ -577,7 +634,7 @@ class NotionService:
             logger.warning("Could not recalculate goal progress for %s: %s", goal_id, exc)
 
     async def close(self) -> None:
-        """Cierra el cliente de Notion."""
+        """Close the Notion client."""
         await self.client.aclose()
 
 
@@ -585,7 +642,7 @@ class NotionService:
 
 
 def _simplify_task(page: dict) -> dict[str, Any]:
-    """Extrae campos clave de un page object de Notion Tasks."""
+    """Pull the key fields out of a Notion Tasks page object."""
     props = page.get("properties", {})
     return {
         "id": page["id"],
@@ -602,18 +659,19 @@ def _simplify_task(page: dict) -> dict[str, Any]:
 
 
 def _simplify_kr(page: dict) -> dict[str, Any]:
-    """Extrae campos clave de un page object de Notion Key Results."""
+    """Pull the key fields out of a Notion Key Results page object."""
     props = page.get("properties", {})
     return {
         "id": page["id"],
         "title": _extract_title(page),
         "status": _extract_select(props, "Status") or "Pending",
         "notes": _extract_rich_text(props, "Notes"),
+        "goal_id": _extract_relation_first(props, "Goals"),
     }
 
 
 def _simplify_goal(page: dict) -> dict[str, Any]:
-    """Extrae campos clave de un page object de Notion Goals."""
+    """Pull the key fields out of a Notion Goals page object."""
     props = page.get("properties", {})
     return {
         "id": page["id"],
@@ -627,7 +685,7 @@ def _simplify_goal(page: dict) -> dict[str, Any]:
 
 
 def _extract_title(page: dict) -> str:
-    """Extrae el título de un page object."""
+    """Extract the title from a page object."""
     props = page.get("properties", {})
     for prop in props.values():
         if prop.get("type") == "title":
@@ -638,7 +696,7 @@ def _extract_title(page: dict) -> str:
 
 
 def _extract_select(props: dict, key: str) -> Optional[str]:
-    """Extrae valor de un campo select."""
+    """Extract the value of a select field."""
     prop = props.get(key, {})
     select = prop.get("select")
     if select:
@@ -647,14 +705,14 @@ def _extract_select(props: dict, key: str) -> Optional[str]:
 
 
 def _extract_multi_select(props: dict, key: str) -> list[str]:
-    """Extrae valores de un campo multi_select."""
+    """Extract the values of a multi_select field."""
     prop = props.get(key, {})
     items = prop.get("multi_select", [])
     return [item.get("name", "") for item in items]
 
 
 def _extract_date(props: dict, key: str) -> Optional[str]:
-    """Extrae fecha de un campo date."""
+    """Extract the date from a date field."""
     prop = props.get(key, {})
     date_val = prop.get("date")
     if date_val:
@@ -663,14 +721,14 @@ def _extract_date(props: dict, key: str) -> Optional[str]:
 
 
 def _extract_rich_text(props: dict, key: str) -> str:
-    """Extrae texto de un campo rich_text."""
+    """Extract the text from a rich_text field."""
     prop = props.get(key, {})
     items = prop.get("rich_text", [])
     return "".join(item.get("text", {}).get("content", "") for item in items)
 
 
 def _extract_relation_first(props: dict, key: str) -> Optional[str]:
-    """Extrae el primer ID de un campo relation."""
+    """Extract the first id from a relation field."""
     prop = props.get(key, {})
     relations = prop.get("relation", [])
     if relations:
@@ -679,7 +737,7 @@ def _extract_relation_first(props: dict, key: str) -> Optional[str]:
 
 
 def _text_to_blocks(text: str) -> list[dict]:
-    """Convierte texto plano a bloques de párrafo de Notion."""
+    """Convert plain text into Notion paragraph blocks."""
     paragraphs = text.split("\n\n") if "\n\n" in text else text.split("\n")
     blocks = []
     for para in paragraphs:

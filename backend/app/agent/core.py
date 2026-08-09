@@ -1,9 +1,9 @@
 """
-Agente principal de productividad.
+Main productivity agent.
 
-Implementa el patrón LLM-as-Router con function calling de Gemini.
-El LLM decide qué herramientas usar basándose en las tool definitions,
-el contexto del usuario y el mensaje recibido.
+Implements the LLM-as-router pattern with Gemini function calling. The model
+decides which tools to use based on the tool declarations, the user context and
+the incoming message.
 """
 
 from __future__ import annotations
@@ -30,17 +30,45 @@ MAX_TOOL_ITERATIONS = 8
 MODEL_ID_VERTEX = "gemini-2.5-flash"
 MODEL_ID_AISTUDIO = "gemini-2.5-flash"
 
+# Used when Gemini returns a response with no content. In the proactive cycle this
+# text is never sent to anyone: it only becomes the silence reason in the log.
+_EMPTY_RESPONSE_FALLBACK = "No pude generar una respuesta en este intento."
+
+# Vertex returns 429 RESOURCE_EXHAUSTED when the model quota saturates. It is
+# transient: without a retry, the first 429 reaches the user as
+# "there was an error processing your message".
+_RETRY_DELAYS_SECONDS = (2, 5, 12)
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    texto = str(exc)
+    return "429" in texto or "RESOURCE_EXHAUSTED" in texto
+
+
+async def generate_with_retry(client, **kwargs):
+    """Call Gemini, retrying with increasing backoff on rate limits."""
+    import asyncio
+
+    for espera in (*_RETRY_DELAYS_SECONDS, None):
+        try:
+            return client.models.generate_content(**kwargs)
+        except Exception as exc:
+            if not _is_rate_limit(exc) or espera is None:
+                raise
+            logger.warning("Vertex rate limit, reintentando en %ds", espera)
+            await asyncio.sleep(espera)
+
 
 class ProductivityAgent:
     """
-    Agente de productividad con function calling.
+    Productivity agent with function calling.
 
-    Flujo:
-    1. Cargar contexto (perfil, agenda, memorias)
-    2. Ensamblar system prompt dinámico
-    3. Llamar a Gemini con tool definitions
-    4. Loop de tool calling hasta respuesta final
-    5. Guardar interacción en memoria
+    Flow:
+    1. Load context (profile, agenda, memories)
+    2. Assemble the dynamic system prompt
+    3. Call Gemini with the tool declarations
+    4. Loop over tool calls until a final answer
+    5. Save the interaction to memory
     """
 
     def __init__(
@@ -53,7 +81,7 @@ class ProductivityAgent:
         experiment_service: Any = None,
         planner: Any = None,
         calendar_service: Any = None,
-        task_scheduler: Any = None,
+        agent_queue: Any = None,
     ) -> None:
         if gcp_project_id:
             self._client = genai.Client(
@@ -71,7 +99,10 @@ class ProductivityAgent:
         self._experiments = experiment_service
         self._planner = planner
         self._calendar = calendar_service
-        self._task_scheduler = task_scheduler
+        self._agent_queue = agent_queue
+        # Assigned by main.py after the bot is built (circular dependency:
+        # TelegramBot takes the agent in its constructor).
+        self.telegram: Any = None
         self._skills = SkillManager(
             firestore_client=memory_manager.db,
             collection_prefix=memory_manager._prefix,
@@ -82,21 +113,28 @@ class ProductivityAgent:
         self,
         user_message: str,
         source: str = "text",
+        save_history: bool = True,
+        extra_tools: list[dict] | None = None,
     ) -> AgentResponse:
         """
-        Procesa un mensaje del usuario y retorna la respuesta completa.
+        Process a user message and return the full response.
 
         Args:
-            user_message: Texto del usuario (ya transcrito si era audio).
-            source: Origen del mensaje ("esp32", "pwa", "text").
+            user_message: The user's text (already transcribed if it was audio).
+            source: Where the message came from ("text", "api", "proactive").
+            save_history: When False, the interaction is not stored in history.
+                Used by proactive wake-ups, where the prompt is internal and the
+                outgoing message is already recorded when it is sent.
+            extra_tools: Extra tool declarations for this call only
+                (e.g. send_message_to_user in the proactive cycle).
 
         Returns:
-            AgentResponse con mensaje y acciones ejecutadas.
+            An AgentResponse with the message and the actions taken.
         """
-        # 1. Cargar contexto
+        # 1. Load context
         context = await self._memory.get_full_context(user_message)
 
-        # 2. Construir system prompt
+        # 2. Build the system prompt
         now = _get_current_datetime(self._timezone)
         relevant_skills = self._skills.get_relevant(user_message)
         active_experiments = self._experiments.list_active() if self._experiments else []
@@ -111,16 +149,19 @@ class ProductivityAgent:
             active_experiments=active_experiments,
         )
 
-        # 3. Preparar historial de conversación
+        # 3. Prepare the conversation history
         contents = _build_contents(
             context["conversation_history"],
             user_message,
+            timezone_str=self._timezone,
         )
 
-        # 4. Preparar tool declarations para Gemini
-        gemini_tools = [types.Tool(function_declarations=TOOLS)]
+        # 4. Prepare the tool declarations
+        gemini_tools = [
+            types.Tool(function_declarations=TOOLS + list(extra_tools or []))
+        ]
 
-        # 5. Loop de function calling
+        # 5. Function-calling loop
         tool_executor = ToolExecutor(
             notion=self._notion,
             memory=self._memory,
@@ -129,14 +170,16 @@ class ProductivityAgent:
             planner=self._planner,
             calendar=self._calendar,
             skill_manager=self._skills,
-            task_scheduler=self._task_scheduler,
+            agent_queue=self._agent_queue,
+            telegram=self.telegram,
         )
         actions_taken: list[ActionTaken] = []
 
         for iteration in range(MAX_TOOL_ITERATIONS):
             logger.debug("Agent iteration %d/%d", iteration + 1, MAX_TOOL_ITERATIONS)
 
-            response = self._client.models.generate_content(
+            response = await generate_with_retry(
+                self._client,
                 model=self._model_id,
                 contents=contents,
                 config=types.GenerateContentConfig(
@@ -147,20 +190,37 @@ class ProductivityAgent:
                 ),
             )
 
-            # Verificar si Gemini quiere llamar a tools
-            candidate = response.candidates[0]
-            parts = candidate.content.parts
+            # Gemini can return a candidate with no content (safety filter,
+            # max_output_tokens cutoff, empty turn). In that case .parts is None
+            # and the loop must break instead of trying to iterate it.
+            candidates = response.candidates or []
+            if not candidates:
+                logger.warning("Gemini returned 0 candidates (iteration %d)", iteration + 1)
+                final_text = _EMPTY_RESPONSE_FALLBACK
+                break
+
+            candidate = candidates[0]
+            parts = (candidate.content.parts if candidate.content else None) or []
+
+            if not parts:
+                logger.warning(
+                    "Gemini returned empty parts (iteration %d, finish_reason=%s)",
+                    iteration + 1,
+                    getattr(candidate, "finish_reason", None),
+                )
+                final_text = _EMPTY_RESPONSE_FALLBACK
+                break
 
             has_function_calls = any(
                 part.function_call is not None for part in parts
             )
 
             if not has_function_calls:
-                # Gemini retornó texto final
+                # Gemini returned its final text
                 final_text = _extract_text(parts)
                 break
 
-            # Ejecutar cada function call
+            # Execute each function call
             function_responses = []
             for part in parts:
                 if part.function_call is not None:
@@ -188,28 +248,29 @@ class ProductivityAgent:
                         )
                     )
 
-            # Agregar la respuesta del modelo y los resultados de tools al historial
+            # Append the model turn and the tool results to the conversation
             contents.append(candidate.content)
             contents.append(types.Content(
                 role="user",
                 parts=function_responses,
             ))
         else:
-            # Safety net: se alcanzó el máximo de iteraciones
+            # Safety net: the iteration cap was reached
             logger.warning("Max tool iterations reached (%d)", MAX_TOOL_ITERATIONS)
             final_text = (
-                "He ejecutado varias acciones pero alcancé el límite de operaciones. "
-                "¿Necesitas que continúe con algo más?"
+                "I ran several actions but hit the operation limit. "
+                "Do you want me to keep going?"
             )
 
-        # 6. Guardar interacción en memoria (async, no bloquea)
-        actions_serialized = [
-            {"tool": a.tool, "args": a.args, "result": a.result}
-            for a in actions_taken
-        ]
-        await self._memory.save_interaction(
-            user_message, final_text, actions_taken=actions_serialized
-        )
+        # 6. Save the interaction to memory (async, non-blocking)
+        if save_history:
+            actions_serialized = [
+                {"tool": a.tool, "args": a.args, "result": a.result}
+                for a in actions_taken
+            ]
+            await self._memory.save_interaction(
+                user_message, final_text, actions_taken=actions_serialized
+            )
 
         return AgentResponse(
             message=final_text,
@@ -223,11 +284,11 @@ class ProductivityAgent:
         source: str = "text",
     ) -> AsyncGenerator[str, None]:
         """
-        Versión streaming para SSE.
+        Streaming variant for SSE.
 
-        Yields chunks de texto y notificaciones de acciones.
+        Yields text chunks and action notifications.
         """
-        # Cargar contexto
+        # Load context
         context = await self._memory.get_full_context(user_message)
         now = _get_current_datetime(self._timezone)
         relevant_skills = self._skills.get_relevant(user_message)
@@ -246,6 +307,7 @@ class ProductivityAgent:
         contents = _build_contents(
             context["conversation_history"],
             user_message,
+            timezone_str=self._timezone,
         )
         gemini_tools = [types.Tool(function_declarations=TOOLS)]
         tool_executor = ToolExecutor(
@@ -256,7 +318,8 @@ class ProductivityAgent:
             planner=self._planner,
             calendar=self._calendar,
             skill_manager=self._skills,
-            task_scheduler=self._task_scheduler,
+            agent_queue=self._agent_queue,
+            telegram=self.telegram,
         )
 
         full_response = ""
@@ -277,7 +340,8 @@ class ProductivityAgent:
             for chunk in response:
                 if not chunk.candidates:
                     continue
-                for part in chunk.candidates[0].content.parts:
+                chunk_content = chunk.candidates[0].content
+                for part in (chunk_content.parts if chunk_content else None) or []:
                     collected_parts.append(part)
                     if part.text:
                         full_response += part.text
@@ -329,12 +393,41 @@ class ProductivityAgent:
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
+def _local_stamp(ts: datetime | None, now_local: datetime, tz) -> str:
+    """
+    Short local timestamp used to prefix a history message.
+
+    Without it the model does not know when each thing happened: it only saw
+    relative gaps and had to infer the rest. That produced errors such as reading
+    a 9am "just woke up" as if it had been said at 11.
+    """
+    if ts is None:
+        return ""
+    try:
+        local = ts.astimezone(tz)
+    except Exception:
+        return ""
+    if local.date() == now_local.date():
+        return f"[{local.strftime('%H:%M')}]"
+    if (now_local.date() - local.date()).days == 1:
+        return f"[ayer {local.strftime('%H:%M')}]"
+    return f"[{local.strftime('%d/%m %H:%M')}]"
+
+
 def _build_contents(
     conversation_history: list[dict[str, Any]],
     user_message: str,
+    timezone_str: str = "America/Lima",
 ) -> list[types.Content]:
-    """Construye el array de contents para Gemini."""
+    """Build the contents array for Gemini."""
     from datetime import datetime, timezone, timedelta
+
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(timezone_str)
+    except Exception:
+        tz = timezone(timedelta(hours=-5))
+    now_local = datetime.now(tz)
 
     contents: list[types.Content] = []
     prev_ts: datetime | None = None
@@ -345,7 +438,7 @@ def _build_contents(
         is_proactive = msg.get("proactive", False)
         ts_str = msg.get("timestamp", "")
 
-        # Parsear timestamp del mensaje
+        # Parse the message timestamp
         curr_ts: datetime | None = None
         if ts_str:
             try:
@@ -353,33 +446,35 @@ def _build_contents(
             except Exception:
                 pass
 
-        # Inyectar marcador de tiempo si hay gap significativo
+        # Every message carries its local time, so hour-level gaps no longer need
+        # their own marker — they can be read off the timestamps. Only whole-day
+        # gaps are announced, since those do change the meaning of the exchange.
         if curr_ts and prev_ts:
             delta = curr_ts - prev_ts
-            if delta >= timedelta(hours=1):
-                hours = int(delta.total_seconds() // 3600)
-                days = delta.days
-                if days >= 1:
-                    gap_note = f"[{days} día(s) sin actividad]"
-                else:
-                    gap_note = f"[{hours} hora(s) sin actividad]"
+            if delta.days >= 1:
                 contents.append(types.Content(
                     role="user",
-                    parts=[types.Part.from_text(text=gap_note)],
+                    parts=[types.Part.from_text(
+                        text=f"[{delta.days} day(s) with no activity]"
+                    )],
                 ))
                 contents.append(types.Content(
                     role="model",
                     parts=[types.Part.from_text(text="Entendido.")],
                 ))
 
-        # Marcar mensajes proactivos que no tuvieron respuesta del usuario
+        stamp = _local_stamp(curr_ts, now_local, tz)
+        if stamp:
+            text = f"{stamp} {text}"
+
+        # Flag proactive messages that got no reply
         if role == "model" and is_proactive:
-            # Verificar si el siguiente mensaje en el buffer es una respuesta del usuario
+            # Check whether the next buffered message is a user reply
             next_msg = conversation_history[i + 1] if i + 1 < len(conversation_history) else None
             if next_msg is None or next_msg.get("proactive") or next_msg.get("role") == "assistant":
-                text = f"[Mensaje enviado proactivamente, sin respuesta del usuario]\n{text}"
+                text = f"[Sent proactively, the user never replied]\n{text}"
 
-        # Si el mensaje asistente tuvo tool calls, anexar info al texto
+        # If the assistant turn used tools, append a compact trace to the text
         actions = msg.get("actions") or []
         if role == "model" and actions:
             tool_lines = []
@@ -401,36 +496,20 @@ def _build_contents(
         if curr_ts:
             prev_ts = curr_ts
 
-    # Inyectar gap entre el último mensaje del historial y el mensaje actual
-    now = datetime.now(timezone.utc)
-    if prev_ts:
-        delta = now - prev_ts
-        if delta >= timedelta(hours=1):
-            days = delta.days
-            hours = int(delta.total_seconds() // 3600)
-            if days >= 1:
-                gap_note = f"[{days} día(s) desde el último mensaje]"
-            else:
-                gap_note = f"[{hours} hora(s) desde el último mensaje]"
-            contents.append(types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=gap_note)],
-            ))
-            contents.append(types.Content(
-                role="model",
-                parts=[types.Part.from_text(text="Entendido.")],
-            ))
-
+    # The current message carries its time too, so the model knows how long it has
+    # been since the last one without doing arithmetic on timestamps.
     contents.append(types.Content(
         role="user",
-        parts=[types.Part.from_text(text=user_message)],
+        parts=[types.Part.from_text(
+            text=f"[{now_local.strftime('%H:%M')}] {user_message}"
+        )],
     ))
 
     return contents
 
 
 def _extract_text(parts: list[types.Part]) -> str:
-    """Extrae texto de las partes de una respuesta de Gemini."""
+    """Extract the text out of a Gemini response's parts."""
     texts = []
     for part in parts:
         if part.text:
@@ -439,11 +518,11 @@ def _extract_text(parts: list[types.Part]) -> str:
 
 
 def _get_current_datetime(timezone_str: str) -> datetime:
-    """Obtiene la fecha/hora actual en la zona horaria del usuario."""
+    """Current date and time in the user's timezone."""
     try:
         from zoneinfo import ZoneInfo
         return datetime.now(ZoneInfo(timezone_str))
     except Exception:
         from datetime import timezone, timedelta
-        # Fallback: Lima es UTC-5
+        # Fallback offset when zoneinfo is unavailable
         return datetime.now(timezone(timedelta(hours=-5)))

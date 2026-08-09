@@ -1,12 +1,12 @@
 """
-Servicio de análisis semanal.
+Weekly analysis service.
 
-Llamado por Cloud Scheduler (domingo 8pm). Agrega últimos 7 días de assistant_history,
-calcula estadísticas, le pide a Gemini que extraiga 2-3 patrones nuevos,
-guarda los insights en Firestore y manda resumen al usuario.
+Triggered by the hourly tick on its cron schedule. Aggregates the last 7 days of
+history, computes statistics, asks Gemini to extract 2-3 new patterns, stores the
+insights in Firestore and sends a summary to the user.
 
-Los insights se inyectan en el system prompt en cada conversación para que
-el agente los use silenciosamente.
+Insights are injected into the system prompt of every conversation so the agent
+can use them quietly.
 """
 
 from __future__ import annotations
@@ -22,40 +22,39 @@ logger = logging.getLogger(__name__)
 
 LOOKBACK_DAYS = 7
 MAX_INSIGHTS_PER_RUN = 3
-MAX_STORED_INSIGHTS = 20  # cap en assistant_insights, FIFO
+MAX_STORED_INSIGHTS = 20  # cap on stored insights, FIFO
 
-INSIGHTS_PROMPT = """Eres un analista de comportamiento. Analiza estos datos de la \
-última semana del usuario y devuelve 2-3 patrones/insights ÚNICOS que el usuario \
-probablemente no nota.
+INSIGHTS_PROMPT = """You are a behaviour analyst. Look at this data from the user's \
+last week and return 2-3 UNIQUE patterns they probably have not noticed themselves.
 
-Datos agregados:
+Aggregated data:
 {stats}
 
-Insights previos ya detectados (NO repitas):
+Insights already detected before (do NOT repeat these):
 {prior}
 
-Reglas:
-- Devuelve SOLO JSON válido sin markdown:
+Rules:
+- Return ONLY valid JSON, no markdown:
 {{
   "insights": [
     {{
-      "title": "Título corto",
-      "description": "Explicación 1-2 frases, basada en datos",
-      "category": "temporal" | "emocional" | "cumplimiento" | "topico" | "patron",
-      "actionable": "Sugerencia concreta de acción"
+      "title": "Short title",
+      "description": "1-2 sentence explanation, grounded in the data",
+      "category": "temporal" | "emotional" | "completion" | "topic" | "pattern",
+      "actionable": "One concrete suggested action"
     }}
   ]
 }}
-- Cada insight debe basarse en datos visibles arriba
-- Si los datos son insuficientes, devuelve {{"insights": []}}
-- No inventes números — usa los que ves
-- Tono: directo, observacional
+- Every insight must be grounded in the data shown above
+- If the data is insufficient, return {{"insights": []}}
+- Never invent numbers — use the ones you can see
+- Tone: direct and observational
 
 JSON:"""
 
 
 class InsightService:
-    """Análisis semanal + storage de insights + reporte."""
+    """Weekly analysis: compute, store insights, report."""
 
     def __init__(
         self,
@@ -63,7 +62,7 @@ class InsightService:
         telegram_bot: Any,
         genai_client: Any,
         collection_prefix: str = "assistant",
-        user_id: str = "noe",
+        user_id: str = "user",
         model_id: str = "gemini-2.5-flash",
         memory_manager: Any = None,
         calendar_service: Any = None,
@@ -82,7 +81,7 @@ class InsightService:
         self.notion = notion_service
 
     async def run_weekly_analysis(self) -> dict[str, Any]:
-        """Ciclo principal del análisis."""
+        """Main analysis cycle."""
         stats = self._aggregate_last_week()
         if stats["total_messages"] < 3:
             return {"ok": False, "reason": "not enough data", "stats": stats}
@@ -99,7 +98,7 @@ class InsightService:
         if stored:
             await self._send_weekly_report(stats, stored)
 
-        # Auto-tune del perfil productivity en base a completion_history
+        # Auto-tune the calibration fields from real completion history
         productivity_change = await self._tune_productivity_profile()
         focus_change = await self._tune_focus_block_minutes()
         work_hours_change = await self._tune_work_hours()
@@ -118,10 +117,10 @@ class InsightService:
             "experiments_cleanup": experiments_change,
         }
 
-    # ── Productivity auto-tuning ────────────────────────────────────────────
+    # ── Calibration auto-tuning ─────────────────────────────────────────────
 
     async def _tune_productivity_profile(self) -> dict[str, Any]:
-        """Ajusta peak_hours/low_energy_hours según cumplimiento real."""
+        """Tune peak_hours / low_energy_hours from real completion rates."""
         if self.calendar is None or self.memory is None:
             return {"applied": False, "reason": "calendar/memory no disponible"}
 
@@ -161,13 +160,9 @@ class InsightService:
         new_peak = _build_hour_range(peak_candidates) if peak_candidates else None
         new_low = _build_hour_range(low_candidates) if low_candidates else None
 
-        try:
-            profile = await self.memory._get_user_profile()
-        except Exception:
-            profile = {}
-        productivity = (profile or {}).get("productivity", {}) or {}
-        cur_peak = productivity.get("peak_hours", "")
-        cur_low = productivity.get("low_energy_hours", "")
+        calibration = self.memory.get_calibration()
+        cur_peak = calibration.get("peak_hours", "")
+        cur_low = calibration.get("low_energy_hours", "")
 
         updates: dict[str, Any] = {}
         if new_peak and new_peak != cur_peak:
@@ -178,10 +173,9 @@ class InsightService:
         if not updates:
             return {"applied": False, "reason": "valores iguales a perfil actual"}
 
-        merged = {**productivity, **updates}
-        await self.memory.update_user_profile({"productivity": merged})
+        await self.memory.update_calibration(updates)
 
-        # Guardar entrada en historial
+        # Record the change in the profile history
         if self.db is not None:
             try:
                 self.db.collection(f"{self._prefix}_profile_history").add({
@@ -195,7 +189,7 @@ class InsightService:
             except Exception as exc:
                 logger.warning("Failed history write: %s", exc)
 
-        # Notif Telegram
+        # Telegram notification
         if self.telegram is not None:
             msg_parts = ["🔧 *Ajusté tu perfil de productividad*"]
             if "peak_hours" in updates:
@@ -214,7 +208,7 @@ class InsightService:
     # ── Focus block tuning ──────────────────────────────────────────────────
 
     async def _tune_focus_block_minutes(self) -> dict[str, Any]:
-        """Ajusta preferred_focus_block_minutes según duración óptima de bloques cumplidos."""
+        """Tune preferred_focus_block_minutes from the best-performing block length."""
         if self.calendar is None or self.memory is None:
             return {"applied": False, "reason": "calendar/memory no disponible"}
 
@@ -222,7 +216,7 @@ class InsightService:
         if not events:
             return {"applied": False, "reason": "sin eventos"}
 
-        # Buckets de duración (min)
+        # Duration buckets, in minutes
         buckets = {"30": {"t": 0, "d": 0}, "45": {"t": 0, "d": 0},
                    "60": {"t": 0, "d": 0}, "90": {"t": 0, "d": 0}, "120": {"t": 0, "d": 0}}
 
@@ -252,18 +246,16 @@ class InsightService:
             return {"applied": False, "reason": "sin muestra suficiente por bucket"}
 
         new_value = best[0]
-        profile = await self.memory._get_user_profile()
-        productivity = (profile or {}).get("productivity", {}) or {}
-        cur = productivity.get("preferred_focus_block_minutes")
+        calibration = self.memory.get_calibration()
+        cur = calibration.get("preferred_focus_block_minutes")
 
         # Solo cambiar si diferencia >= 15 min
         if cur is not None and abs(new_value - cur) < 15:
             return {"applied": False, "reason": "valor cercano al actual"}
 
-        merged = {**productivity, "preferred_focus_block_minutes": new_value}
-        await self.memory.update_user_profile({"productivity": merged})
+        await self.memory.update_calibration({"preferred_focus_block_minutes": new_value})
         await self._notify(
-            f"🔧 *Ajusté duración ideal de bloque*\n"
+            f"🔧 *Adjusted your ideal block length*\n"
             f"• `{cur or 'sin valor'}min` → `{new_value}min`\n"
             f"_Bloques de {new_value}min cumplen {best[1]*100:.0f}% (n={best[2]})._"
         )
@@ -272,7 +264,7 @@ class InsightService:
     # ── Work hours tuning ──────────────────────────────────────────────────
 
     async def _tune_work_hours(self) -> dict[str, Any]:
-        """Ajusta work_start/work_end según horas reales con actividad."""
+        """Tune work_start / work_end from the hours with real activity."""
         if self.calendar is None or self.memory is None:
             return {"applied": False, "reason": "calendar/memory no disponible"}
 
@@ -302,10 +294,9 @@ class InsightService:
         new_start = f"{int(p10_start)}:{int((p10_start % 1) * 60):02d}"
         new_end = f"{int(p90_end)}:{int((p90_end % 1) * 60):02d}"
 
-        profile = await self.memory._get_user_profile()
-        productivity = (profile or {}).get("productivity", {}) or {}
-        cur_start = productivity.get("work_start", "")
-        cur_end = productivity.get("work_end", "")
+        calibration = self.memory.get_calibration()
+        cur_start = calibration.get("work_start", "")
+        cur_end = calibration.get("work_end", "")
 
         updates = {}
         if new_start != cur_start and abs(_hour_str_to_float(new_start) - _hour_str_to_float(cur_start)) >= 0.5:
@@ -316,9 +307,8 @@ class InsightService:
         if not updates:
             return {"applied": False, "reason": "valores cercanos al perfil"}
 
-        merged = {**productivity, **updates}
-        await self.memory.update_user_profile({"productivity": merged})
-        parts = ["🔧 *Ajusté tus horas laborales*"]
+        await self.memory.update_calibration(updates)
+        parts = ["🔧 *Adjusted your working hours*"]
         if "work_start" in updates:
             parts.append(f"• Inicio: `{cur_start or 'sin valor'}` → `{updates['work_start']}`")
         if "work_end" in updates:
@@ -327,10 +317,10 @@ class InsightService:
         await self._notify("\n".join(parts))
         return {"applied": True, "updates": updates, "samples": len(starts)}
 
-    # ── Estimation calibration ─────────────────────────────────────────────
+    # ── Estimation calibration ──────────────────────────────────────────────
 
     async def _tune_estimation_calibration(self) -> dict[str, Any]:
-        """Aprende cuánto te tomas vs estimas. Guarda factor en profile."""
+        """Learn how long things really take versus the estimate. Stores the factor."""
         if self.calendar is None or self.memory is None or self.notion is None:
             return {"applied": False, "reason": "deps no disponibles"}
 
@@ -363,17 +353,15 @@ class InsightService:
         ratios.sort()
         median_ratio = ratios[len(ratios) // 2]
 
-        profile = await self.memory._get_user_profile()
-        productivity = (profile or {}).get("productivity", {}) or {}
-        cur_cal = productivity.get("estimation_calibration", 1.0)
+        calibration = self.memory.get_calibration()
+        cur_cal = calibration.get("estimation_calibration", 1.0)
 
         # Solo aplicar si diff >= 0.15
         if abs(median_ratio - cur_cal) < 0.15:
-            return {"applied": False, "reason": "calibración cercana", "median": median_ratio}
+            return {"applied": False, "reason": "calibration already close", "median": median_ratio}
 
         new_cal = round(median_ratio, 2)
-        merged = {**productivity, "estimation_calibration": new_cal}
-        await self.memory.update_user_profile({"productivity": merged})
+        await self.memory.update_calibration({"estimation_calibration": new_cal})
 
         if new_cal > 1.0:
             direction = f"subestimas {int((new_cal - 1) * 100)}%"
@@ -388,10 +376,10 @@ class InsightService:
         )
         return {"applied": True, "value": new_cal, "samples": len(ratios), "details": details[:5]}
 
-    # ── Experiments auto-close ─────────────────────────────────────────────
+    # ── Experiments auto-close ──────────────────────────────────────────────
 
     async def _auto_close_stale_experiments(self) -> dict[str, Any]:
-        """Cierra experimentos vencidos o abandonados."""
+        """Close experiments that are past their end date or clearly abandoned."""
         if self.experiments is None:
             return {"applied": False, "reason": "experiments no disponible"}
 
@@ -460,7 +448,7 @@ class InsightService:
     # ── Helpers internos ────────────────────────────────────────────────────
 
     def _fetch_plan_events(self, days: int = 30) -> list[dict[str, Any]]:
-        """Devuelve eventos [plan] últimos N días (cumplidos o no)."""
+        """Return [plan] events from the last N days, completed or not."""
         from datetime import timezone as _tz
         now = datetime.now(_tz.utc)
         try:
@@ -473,6 +461,32 @@ class InsightService:
         except Exception as exc:
             logger.warning("fetch_plan_events failed: %s", exc)
             return []
+
+    def _user_context(self) -> str:
+        """
+        User context shared with the chat agent and the planner.
+
+        The weekly analyst draws conclusions about the user's life, so it needs
+        to know who they are. It used to see anonymous statistics only.
+        """
+        if self.memory is None:
+            return ""
+        try:
+            from datetime import datetime as _dt
+            from zoneinfo import ZoneInfo
+
+            from app.agent.prompt_builder import build_user_context
+
+            return build_user_context(
+                user_profile={
+                    "entries": self.memory.get_profile_entries(),
+                    "calibration": self.memory.get_calibration(),
+                },
+                current_datetime=_dt.now(ZoneInfo("America/Lima")),
+            )
+        except Exception as exc:
+            logger.warning("Insights: could not build user context: %s", exc)
+            return ""
 
     async def _notify(self, text: str) -> None:
         if self.telegram is None:
@@ -489,7 +503,7 @@ class InsightService:
     # ── Aggregation ─────────────────────────────────────────────────────────
 
     def _aggregate_last_week(self) -> dict[str, Any]:
-        """Agrega métricas desde assistant_history últimos 7 días."""
+        """Aggregate metrics from the last 7 days of history."""
         if self.db is None:
             return {"total_messages": 0}
 
@@ -586,15 +600,21 @@ class InsightService:
             or "(ninguno)"
         )
 
+
         prompt = INSIGHTS_PROMPT.format(
             stats=json.dumps(stats, indent=2, ensure_ascii=False),
             prior=prior_text,
         )
 
         try:
+            from google.genai import types as _types
+
             response = self.genai.models.generate_content(
                 model=self._model_id,
                 contents=prompt,
+                config=_types.GenerateContentConfig(
+                    system_instruction=self._user_context() or None,
+                ),
             )
             text = response.text or ""
             parsed = _parse_json_loose(text)
@@ -731,7 +751,7 @@ def _hour_str_to_float(value: str) -> float:
 
 
 def _build_hour_range(candidates: list[tuple[int, float, int]]) -> str | None:
-    """Convierte lista [(hour, rate, total)] ordenada por hora en string 'H:00-H:00'.
+    """Turn an hour-sorted [(hour, rate, total)] list into an 'H:00-H:00' string.
 
     Si las horas son contiguas, devuelve un rango único. Si hay gaps, los segmenta
     con coma. Ej: [(6,0.8,5),(7,0.75,4),(15,0.7,3)] → '6:00-8:00,15:00-16:00'.

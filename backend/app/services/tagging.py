@@ -1,14 +1,15 @@
 """
-Tagging service: anota cada interacción con metadata útil para análisis posterior.
+Tagging service: annotates each interaction with metadata for later analysis.
 
-Usa Gemini Flash (rápido y barato) para extraer:
-- sentiment: tono emocional del mensaje del usuario
-- topics: temas tratados
-- energy_level: nivel de energía/compromiso
-- hedging_score: cuánto duda/se compromete (0=firme, 1=muy dudoso)
-- is_action_commitment: si comprometió a hacer algo concreto
+Uses Gemini Flash (fast and cheap) to extract:
+- sentiment: emotional tone of the user's message
+- topics: what was discussed
+- energy_level: perceived energy / engagement
+- hedging_score: how much they hedge (0 = firm, 1 = very tentative)
+- is_action_commitment: whether they committed to something concrete
 
-Estos tags se guardan en assistant_history para detectar patrones después.
+These tags are stored alongside the history so the weekly analysis can find
+patterns in HOW the user talks, not just what they ask for.
 """
 
 from __future__ import annotations
@@ -20,41 +21,45 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-TAGGING_PROMPT = """Analiza este mensaje del usuario y la respuesta del asistente. \
-Devuelve SOLO un JSON válido sin markdown, sin explicaciones, con esta estructura exacta:
+# NOTE: the braces in the JSON example are doubled ({{ }}) because this template
+# is built with .format(). With single braces Python reads them as fields and
+# raises KeyError before ever reaching Gemini — which killed tagging entirely.
+TAGGING_PROMPT = """Analyse this user message and the assistant's reply. Return \
+ONLY valid JSON, no markdown and no explanation, with exactly this shape:
 
-{
+{{
   "sentiment": "negative" | "neutral" | "positive" | "anxious" | "motivated" | "frustrated" | "reflective",
   "topics": ["array", "de", "topics", "principales"],
   "energy_level": "high" | "medium" | "low",
   "hedging_score": 0.0,
   "is_action_commitment": false,
   "themes_mentioned": ["trabajo", "salud", "relaciones", "metas", "habitos", "emocional", "otro"]
-}
+}}
 
-Reglas:
-- sentiment: tono dominante del MENSAJE DEL USUARIO
-- topics: 1-4 temas concretos en español, lowercase, ej ["estudiar aws", "procrastinacion"]
-- energy_level: nivel energético percibido del usuario
-- hedging_score: 0.0 = firme/decidido, 1.0 = muy dudoso. Cuenta "tal vez", "quizás", "intentaré"
-- is_action_commitment: true si usuario se compromete a hacer algo concreto
-- themes_mentioned: subset del array dado, los que apliquen
+Rules:
+- sentiment: the dominant tone of the USER MESSAGE
+- topics: 1-4 concrete topics, lowercase, in the user's own language
+- energy_level: the user's perceived energy
+- hedging_score: 0.0 = firm and decided, 1.0 = very tentative. Count hedges like
+  "maybe", "I guess", "I'll try"
+- is_action_commitment: true when they commit to something concrete
+- themes_mentioned: a subset of the array given above
 
-Mensaje usuario: {user_msg}
-Respuesta asistente: {agent_msg}
+User message: {user_msg}
+Assistant reply: {agent_msg}
 
 JSON:"""
 
 
 class TaggingService:
-    """Tag de cada interacción con metadata vía Gemini Flash."""
+    """Tags each interaction with metadata via Gemini Flash."""
 
     def __init__(self, genai_client: Any, model_id: str = "gemini-2.5-flash") -> None:
         self._client = genai_client
         self._model_id = model_id
 
     async def tag(self, user_message: str, agent_response: str) -> dict[str, Any]:
-        """Tag una interacción. Devuelve dict con metadata."""
+        """Tag one interaction. Returns a metadata dict."""
         if self._client is None:
             return {}
 
@@ -77,12 +82,12 @@ class TaggingService:
 
 
 def _parse_json_loose(text: str) -> dict[str, Any]:
-    """Parsea JSON aunque venga con markdown code fences."""
+    """Parse JSON even when it arrives wrapped in markdown code fences."""
     cleaned = text.strip()
-    # Quitar markdown fences si están
+    # Strip markdown fences if present
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
     cleaned = re.sub(r"\s*```$", "", cleaned)
-    # Encontrar primer { y último }
+    # Find the first { and the last }
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start == -1 or end == -1:
@@ -94,7 +99,7 @@ def _parse_json_loose(text: str) -> dict[str, Any]:
 
 
 def _validate_tags(tags: dict[str, Any]) -> dict[str, Any]:
-    """Valida y limpia tags. Devuelve dict seguro para Firestore."""
+    """Validate and clean the tags. Returns a dict safe to store in Firestore."""
     if not isinstance(tags, dict):
         return {}
 

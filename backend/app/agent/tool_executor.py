@@ -1,8 +1,8 @@
 """
-Ejecutor de tools: despacha llamadas de Gemini a los servicios correspondientes.
+Tool executor: dispatches Gemini tool calls to the right services.
 
-Cada tool name se mapea a un método del servicio apropiado.
-Retorna resultados simplificados como dict para que Gemini los procese.
+Each tool name maps to a handler that calls the appropriate service and returns
+a simplified dict for the model to read.
 """
 
 from __future__ import annotations
@@ -16,13 +16,13 @@ from app.agent.skill_manager import SkillManager
 from app.services.experiments import ExperimentService
 from app.services.memory import MemoryManager
 from app.services.notion import NotionService
-from app.services.task_scheduler import TaskScheduler
+from app.services.agent_queue import AgentTaskQueue
 
 logger = logging.getLogger(__name__)
 
 
 class ToolExecutor:
-    """Ejecuta tool calls despachándolas a los servicios."""
+    """Executes tool calls by dispatching them to the services."""
 
     def __init__(
         self,
@@ -33,7 +33,8 @@ class ToolExecutor:
         planner: Any = None,
         calendar: Any = None,
         skill_manager: SkillManager | None = None,
-        task_scheduler: TaskScheduler | None = None,
+        agent_queue: AgentTaskQueue | None = None,
+        telegram: Any = None,
     ) -> None:
         self.notion = notion
         self.memory = memory
@@ -42,37 +43,53 @@ class ToolExecutor:
         self.calendar = calendar
         self._source = source
         self._skills = skill_manager
-        self._task_scheduler = task_scheduler
+        self._agent_queue = agent_queue
+        self.telegram = telegram
 
     async def execute(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         """
-        Ejecuta una tool y retorna el resultado.
+        Execute one tool and return its result.
 
         Args:
-            tool_name: Nombre de la tool (debe coincidir con TOOLS).
-            args: Argumentos de la tool (del function call de Gemini).
+            tool_name: The tool name (must match one declared in TOOLS).
+            args: The tool arguments from Gemini's function call.
 
         Returns:
-            Diccionario con el resultado de la ejecución.
+            A dict with the execution result.
         """
         logger.info("Executing tool: %s with args: %s", tool_name, json.dumps(args, default=str))
 
         handler = self._handlers.get(tool_name)
         if handler is None:
             logger.error("Unknown tool: %s", tool_name)
-            return {"error": f"Tool desconocida: {tool_name}"}
+            return {"error": f"Unknown tool: {tool_name}"}
 
         try:
             result = await handler(self, **args)
-            # Invalidar cache de trabajo después de operaciones de escritura
-            if tool_name in ("create_task", "update_task", "create_goal", "update_goal_progress", "update_goal", "archive_goal", "create_key_result", "update_key_result", "complete_key_result"):
+            # Invalidate the work-context cache after any write
+            if tool_name in ("create_task", "update_task", "archive_task", "create_goal", "update_goal_progress", "update_goal", "archive_goal", "create_key_result", "update_key_result", "complete_key_result", "archive_key_result"):
                 self.memory.invalidate_work_context_cache()
             return result
         except Exception as exc:
             logger.error("Tool %s failed: %s", tool_name, exc)
-            return {"error": f"Error ejecutando {tool_name}: {str(exc)}"}
+            return {"error": f"Error running {tool_name}: {str(exc)}"}
 
     # ── Handlers ─────────────────────────────────────────────────────────────
+
+    async def _send_message_to_user(
+        self, message: str, message_type: str, reason: str
+    ) -> dict[str, Any]:
+        """
+        Record the intent to message the user. Nothing is sent here:
+        ProactiveService reads this decision out of actions_taken and applies the
+        hard limits (quiet hours, daily cap, anti-repetition) before sending.
+        """
+        logger.info("Proactive decision: type=%s reason=%s", message_type, reason)
+        return {"status": "queued", "message_type": message_type, "reason": reason}
+
+    async def _save_day_priority(self, date: str, priority: str) -> dict[str, Any]:
+        self.memory.save_day_priority(date, priority)
+        return {"status": "saved", "date": date}
 
     async def _create_task(
         self,
@@ -81,7 +98,6 @@ class ToolExecutor:
         due_date: str | None = None,
         scheduled_date: str | None = None,
         time_estimate_minutes: int | None = None,
-        project: str | None = None,
         tags: list[str] | None = None,
         goal_id: str | None = None,
     ) -> dict[str, Any]:
@@ -92,7 +108,6 @@ class ToolExecutor:
             due_date=due_date,
             scheduled_date=scheduled_date,
             time_estimate_minutes=time_estimate_minutes,
-            project=project,
             tags=tags,
             source=source_label,
             goal_id=goal_id,
@@ -104,14 +119,12 @@ class ToolExecutor:
         status: str | None = None,
         date: str | None = None,
         priority: str | None = None,
-        project: str | None = None,
         limit: int = 20,
     ) -> dict[str, Any]:
         tasks = await self.notion.get_tasks(
             status=status,
             date=date,
             priority=priority,
-            project=project,
             limit=limit,
         )
         return {"tasks": tasks, "count": len(tasks)}
@@ -119,23 +132,33 @@ class ToolExecutor:
     async def _update_task(
         self,
         task_id: str,
+        title: str | None = None,
         status: str | None = None,
         priority: str | None = None,
         due_date: str | None = None,
         scheduled_date: str | None = None,
+        time_estimate_minutes: int | None = None,
+        tags: list[str] | None = None,
+        goal_id: str | None = None,
     ) -> dict[str, Any]:
-        updates = {}
-        if status is not None:
-            updates["status"] = status
-        if priority is not None:
-            updates["priority"] = priority
-        if due_date is not None:
-            updates["due_date"] = due_date
-        if scheduled_date is not None:
-            updates["scheduled_date"] = scheduled_date
+        candidates = {
+            "title": title,
+            "status": status,
+            "priority": priority,
+            "due_date": due_date,
+            "scheduled_date": scheduled_date,
+            "time_estimate_minutes": time_estimate_minutes,
+            "tags": tags,
+            "goal_id": goal_id,
+        }
+        updates = {k: v for k, v in candidates.items() if v is not None}
 
         result = await self.notion.update_task(task_id, **updates)
         return {"status": "updated", "task": result}
+
+    async def _archive_task(self, task_id: str, task_title: str) -> dict[str, Any]:
+        result = await self.notion.archive_task(task_id)
+        return {"status": "archived", "task": task_title, **result}
 
 
 
@@ -213,10 +236,20 @@ class ToolExecutor:
         result = await self.notion.create_key_result(goal_id=goal_id, title=title, notes=notes)
         return {"status": "created", "key_result": result}
 
-    async def _get_key_results(self, goal_id: str) -> dict[str, Any]:
-        krs = await self.notion.get_key_results(goal_id)
+    async def _get_key_results(
+        self,
+        goal_id: str | None = None,
+        unassigned_only: bool = False,
+    ) -> dict[str, Any]:
+        krs = await self.notion.get_key_results(
+            goal_id=goal_id, unassigned_only=unassigned_only
+        )
         done = sum(1 for kr in krs if kr.get("status") == "Done")
         return {"key_results": krs, "count": len(krs), "done": done, "pending": len(krs) - done}
+
+    async def _archive_key_result(self, kr_id: str, kr_title: str) -> dict[str, Any]:
+        result = await self.notion.archive_key_result(kr_id)
+        return {"status": "archived", "key_result": kr_title, **result}
 
     async def _update_key_result(
         self,
@@ -224,13 +257,26 @@ class ToolExecutor:
         title: str | None = None,
         notes: str | None = None,
         status: str | None = None,
+        goal_id: str | None = None,
     ) -> dict[str, Any]:
-        result = await self.notion.update_key_result(kr_id=kr_id, title=title, notes=notes, status=status)
+        result = await self.notion.update_key_result(
+            kr_id=kr_id, title=title, notes=notes, status=status, goal_id=goal_id
+        )
         return {"status": "updated", "key_result": result}
 
     async def _complete_key_result(self, kr_id: str, note: str = "") -> dict[str, Any]:
         result = await self.notion.mark_kr_done(kr_id=kr_id, note=note)
         return {"status": "completed", "key_result": result}
+
+    async def _read_storage(
+        self,
+        collection: str,
+        document_id: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        return self.memory.read_storage(
+            collection=collection, document_id=document_id, limit=limit
+        )
 
     async def _get_user_profile(self) -> dict[str, Any]:
         context = await self.memory.get_full_context("")
@@ -246,7 +292,7 @@ class ToolExecutor:
         check_in_every_days: int = 3,
     ) -> dict[str, Any]:
         if self.experiments is None:
-            return {"error": "ExperimentService no disponible"}
+            return {"error": "ExperimentService unavailable"}
         result = self.experiments.start_experiment(
             name=name,
             hypothesis=hypothesis,
@@ -262,7 +308,7 @@ class ToolExecutor:
         did_it: bool = True,
     ) -> dict[str, Any]:
         if self.experiments is None:
-            return {"error": "ExperimentService no disponible"}
+            return {"error": "ExperimentService unavailable"}
         result = self.experiments.log_progress(
             experiment_id=experiment_id,
             note=note,
@@ -277,7 +323,7 @@ class ToolExecutor:
         status: str = "completed",
     ) -> dict[str, Any]:
         if self.experiments is None:
-            return {"error": "ExperimentService no disponible"}
+            return {"error": "ExperimentService unavailable"}
         result = self.experiments.close_experiment(
             experiment_id=experiment_id,
             outcome=outcome,
@@ -291,7 +337,7 @@ class ToolExecutor:
         active = self.experiments.list_active()
         return {"experiments": active, "count": len(active)}
 
-    # ── Calendar (read-only directo) ────────────────────────────────────────
+    # ── Calendar (direct read-only access) ──────────────────────────────────
 
     async def _get_calendar_events(
         self,
@@ -300,14 +346,14 @@ class ToolExecutor:
         days: int = 1,
     ) -> dict[str, Any]:
         if self.calendar is None:
-            return {"error": "Calendar no disponible"}
+            return {"error": "Calendar unavailable"}
         from datetime import datetime as _dt
         start = _dt.fromisoformat(start_iso) if start_iso else None
         end = _dt.fromisoformat(end_iso) if end_iso else None
         events = self.calendar.list_events(start=start, end=end, days=days)
         return {"events": events, "count": len(events)}
 
-    # ── Planner delegation ─────────────────────────────────────────────────
+    # ── Planner delegation ──────────────────────────────────────────────────
 
     async def _delegate_to_planner(
         self,
@@ -316,18 +362,16 @@ class ToolExecutor:
         instruction: str | None = None,
     ) -> dict[str, Any]:
         if self.planner is None:
-            return {"error": "Planner no disponible"}
+            return {"error": "Planner unavailable"}
         if action == "plan_day":
             return await self.planner.plan_day(target_date_iso=target_date)
-        if action == "verify_recent":
-            return await self.planner.verify_recent()
         if action == "daily_review":
             return await self.planner.daily_review(day_iso=target_date, user_input=instruction or "")
         if action == "edit_request":
             if not instruction:
                 return {"error": "edit_request requiere 'instruction'"}
             return await self.planner.edit_request(instruction=instruction)
-        return {"error": f"Acción desconocida: {action}"}
+        return {"error": f"Unknown action: {action}"}
 
     # ── Memory management ────────────────────────────────────────────────────
 
@@ -349,22 +393,39 @@ class ToolExecutor:
             return {"status": "deleted", "memory": memory_text}
         return {"error": f"Could not delete memory '{memory_text}'"}
 
-    async def _update_my_profile(self, field: str, value: str) -> dict[str, Any]:
-        # Support dot notation: "productivity.work_start" → nested dict update
-        keys = field.split(".")
-        if len(keys) == 1:
-            updates = {field: value}
-        else:
-            # Build nested dict: {"productivity": {"work_start": value}}
-            updates = {}
-            d = updates
-            for k in keys[:-1]:
-                d[k] = {}
-                d = d[k]
-            d[keys[-1]] = value
-        await self.memory.update_user_profile(updates)
+    async def _update_my_profile(
+        self, entry: str, replaces: str | None = None
+    ) -> dict[str, Any]:
+        result = self.memory.add_profile_entry(entry, replaces=replaces)
+        if result.get("error"):
+            return result
         self.memory.invalidate_work_context_cache()
-        return {"status": "updated", "field": field, "value": value}
+
+        # The profile goes into all three agents' prompts, so a change here alters
+        # the behaviour of the whole system. It gets recorded in the log.
+        if result.get("replaced"):
+            await self._log_to_bitacora(
+                f"✏️ perfil editado\nantes: {result['replaced']}\nahora: {entry}"
+            )
+        else:
+            await self._log_to_bitacora(f"✏️ perfil: entrada nueva\n{entry}")
+        return result
+
+    async def _forget_about_me(self, entry: str) -> dict[str, Any]:
+        result = self.memory.remove_profile_entry(entry)
+        if result.get("status") == "removed":
+            self.memory.invalidate_work_context_cache()
+            await self._log_to_bitacora(f"🗑️ perfil: entrada borrada\n{entry}")
+        return result
+
+    async def _log_to_bitacora(self, text: str) -> None:
+        """Write to the activity log if available. Never raises."""
+        if self.telegram is None:
+            return
+        try:
+            await self.telegram.send_log_message(text)
+        except Exception:
+            pass
 
     # ── Skills ───────────────────────────────────────────────────────────────
 
@@ -395,36 +456,36 @@ class ToolExecutor:
             logger.error("Failed to delete skill '%s': %s", name, exc)
             return {"error": str(exc)}
 
-    # ── Scheduled tasks ──────────────────────────────────────────────────────
+    # ── Scheduled agent reminders ────────────────────────────────────────────
 
-    async def _schedule_task(
+    async def _schedule_agent_task(
         self, title: str, prompt: str, run_at: str
     ) -> dict[str, Any]:
-        if self._task_scheduler is None:
-            return {"error": "TaskScheduler not available"}
+        if self._agent_queue is None:
+            return {"error": "AgentTaskQueue not available"}
         try:
-            task_id = self._task_scheduler.create_task(title, prompt, run_at)
+            task_id = self._agent_queue.create_task(title, prompt, run_at)
             return {"status": "scheduled", "task_id": task_id, "title": title, "run_at": run_at}
         except Exception as exc:
-            logger.error("schedule_task failed: %s", exc)
+            logger.error("schedule_agent_task failed: %s", exc)
             return {"error": str(exc)}
 
-    async def _cancel_scheduled_task(
+    async def _cancel_agent_task(
         self, task_id: str, task_title: str
     ) -> dict[str, Any]:
-        if self._task_scheduler is None:
-            return {"error": "TaskScheduler not available"}
-        cancelled = self._task_scheduler.cancel_task(task_id)
+        if self._agent_queue is None:
+            return {"error": "AgentTaskQueue not available"}
+        cancelled = self._agent_queue.cancel_task(task_id)
         if cancelled:
             return {"status": "cancelled", "task": task_title}
         return {"status": "not_found", "task_id": task_id}
 
-    async def _list_scheduled_tasks(self) -> dict[str, Any]:
-        if self._task_scheduler is None:
-            return {"tasks": [], "message": "TaskScheduler not available"}
-        tasks = self._task_scheduler.list_tasks(status="pending")
+    async def _list_agent_tasks(self) -> dict[str, Any]:
+        if self._agent_queue is None:
+            return {"tasks": [], "message": "AgentTaskQueue not available"}
+        tasks = self._agent_queue.list_tasks(status="pending")
         if not tasks:
-            return {"tasks": [], "message": "No scheduled tasks pending"}
+            return {"tasks": [], "message": "No agent tasks pending"}
         return {"tasks": tasks, "count": len(tasks)}
 
     # ── Dispatch map ─────────────────────────────────────────────────────────
@@ -433,13 +494,17 @@ class ToolExecutor:
         "create_task": _create_task,
         "get_tasks": _get_tasks,
         "update_task": _update_task,
+        "archive_task": _archive_task,
 
         "create_goal": _create_goal,
         "get_goals": _get_goals,
+        "save_day_priority": _save_day_priority,
+        "send_message_to_user": _send_message_to_user,
         "update_goal_progress": _update_goal_progress,
         "update_goal": _update_goal,
         "archive_goal": _archive_goal,
         "get_user_profile": _get_user_profile,
+        "read_storage": _read_storage,
         "start_experiment": _start_experiment,
         "log_experiment_progress": _log_experiment_progress,
         "close_experiment": _close_experiment,
@@ -450,18 +515,20 @@ class ToolExecutor:
         "list_memories": _list_memories,
         "forget_memory": _forget_memory,
         "update_my_profile": _update_my_profile,
+        "forget_about_me": _forget_about_me,
         "save_skill": _save_skill,
         "delete_skill": _delete_skill,
-        "schedule_task": _schedule_task,
-        "cancel_scheduled_task": _cancel_scheduled_task,
-        "list_scheduled_tasks": _list_scheduled_tasks,
+        "schedule_agent_task": _schedule_agent_task,
+        "cancel_agent_task": _cancel_agent_task,
+        "list_agent_tasks": _list_agent_tasks,
         "create_key_result": _create_key_result,
         "get_key_results": _get_key_results,
         "update_key_result": _update_key_result,
         "complete_key_result": _complete_key_result,
+        "archive_key_result": _archive_key_result,
     }
 
 
 def date_module_today() -> date:
-    """Wrapper para facilitar testing."""
+    """Wrapper to make testing easier."""
     return date.today()

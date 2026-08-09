@@ -1,14 +1,14 @@
 ---
 name: weekly-analysis
 description: Sunday evening weekly analysis — patterns, insights, and next-week prep
-triggers: [weekly, análisis semanal, week review, semana, weekly analysis]
+triggers: [weekly, week review, weekly analysis, patterns]
 schedule: "0 20 * * 0"
 job: insights.weekly_analysis
 ---
 
 # Weekly Analysis
 
-Runs every Sunday at 8pm Lima time.
+Runs every Sunday at 8pm in the user's timezone (see the `schedule` field).
 
 ## What it does
 
@@ -25,4 +25,5 @@ Runs every Sunday at 8pm Lima time.
 
 ## To change the schedule
 
-Ask the bot: "run the weekly analysis on Friday evenings instead."
+Ask the bot: "run the weekly analysis on Friday evenings instead", or edit the
+`schedule` field in this frontmatter.

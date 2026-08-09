@@ -1,16 +1,17 @@
 """
-FastAPI application — Asistente Personal de Productividad.
+FastAPI application — personal productivity assistant.
 
-Input principal: Telegram bot (texto).
+Primary input: a Telegram bot (text).
 
 Endpoints:
-- POST /api/v1/chat     → Recibe texto, procesa con agente (uso interno)
-- GET  /api/v1/health   → Health check
-- GET  /api/v1/context  → Contexto actual del usuario
+- POST /api/v1/chat     -> receive text, run the agent (internal/debug)
+- POST /api/v1/tick     -> hourly cycle: cron skills + due reminders
+- GET  /api/v1/health   -> health check
+- GET  /api/v1/context  -> the user's current context
 
-# TODO: Descomentar cuando se active ESP32
-# - POST /api/v1/voice  → Recibe audio, transcribe, procesa con agente
-# - POST /api/v1/chat/stream → Texto con respuesta SSE streaming
+# TODO: uncomment when voice input is enabled
+# - POST /api/v1/voice  -> receive audio, transcribe, run the agent
+# - POST /api/v1/chat/stream -> text in, SSE streaming out
 """
 
 from __future__ import annotations
@@ -45,17 +46,17 @@ from app.services.notion import NotionService
 from app.services.principles import PrincipleService
 from app.services.proactive import ProactiveService
 from app.services.tagging import TaggingService
-from app.services.task_scheduler import TaskScheduler
+from app.services.agent_queue import AgentTaskQueue
 from app.services.telegram import TelegramBot
 
-# TODO: Descomentar cuando se active ESP32 + voice
+# TODO: uncomment when voice input is enabled
 # from app.services.stt import STTService
 # from app.services.storage import StorageService
 # from app.middleware.auth import verify_request
 
 logger = logging.getLogger(__name__)
 
-# ── Estado global de la app (inicializado en lifespan) ───────────────────────
+# ── Global app state (initialised in the lifespan handler) ──────────────────
 _notion_service: NotionService | None = None
 _memory_manager: MemoryManager | None = None
 _agent: ProductivityAgent | None = None
@@ -64,17 +65,17 @@ _proactive_service: ProactiveService | None = None
 _insight_service: InsightService | None = None
 _planner_agent: PlannerAgent | None = None
 _calendar_service: CalendarService | None = None
-_task_scheduler: TaskScheduler | None = None
+_agent_queue: AgentTaskQueue | None = None
 _tick_handler: TickHandler | None = None
 
-# TODO: Descomentar cuando se active ESP32
+# TODO: uncomment when voice input is enabled
 # _stt_service: STTService | None = None
 # _storage_service: StorageService | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Inicializa y limpia recursos al startup/shutdown."""
+    """Initialise and tear down resources on startup/shutdown."""
     global _notion_service, _memory_manager, _agent, _telegram_bot
 
     settings = get_settings()
@@ -113,16 +114,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         user_id=settings.user_id,
     )
 
-    # Tagging (Gemini Flash compartido)
+    # Tagging (shared Gemini Flash client)
     tagging_service = _init_tagging_service(settings)
 
-    # Insights service early (necesario por MemoryManager para inyectar en prompt)
+    # Insights service is built early: MemoryManager injects it into the prompt
     insights_genai = _build_genai_client(settings)
     insight_service_local = None
     if insights_genai is not None:
         insight_service_local = InsightService(
             firestore_client=firestore_client,
-            telegram_bot=None,  # se asigna después de crear el bot
+            telegram_bot=None,  # assigned after the bot is created
             genai_client=insights_genai,
             collection_prefix=settings.firestore_collection_prefix,
             user_id=settings.user_id,
@@ -166,11 +167,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         logger.info("Planner agent initialized")
     else:
-        logger.warning("Calendar token no disponible — planner deshabilitado")
+        logger.warning("Calendar token unavailable — planner disabled")
 
-    # Task Scheduler (one-time queue)
-    global _task_scheduler
-    _task_scheduler = TaskScheduler(
+    # One-time reminder queue
+    global _agent_queue
+    _agent_queue = AgentTaskQueue(
         db=firestore_client,
         collection_prefix=settings.firestore_collection_prefix,
     )
@@ -184,7 +185,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         experiment_service=experiment_service,
         planner=_planner_agent,
         calendar_service=_calendar_service,
-        task_scheduler=_task_scheduler,
+        agent_queue=_agent_queue,
     )
 
     # Telegram Bot
@@ -193,10 +194,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         allowed_user_id=settings.telegram_allowed_user_id,
         agent=_agent,
         memory_manager=_memory_manager,
+        log_bot_token=settings.telegram_log_bot_token,
+        log_chat_id=settings.telegram_log_chat_id,
     )
+    # The agent needs the bot to write to the activity log (e.g. profile changes).
+    # Assigned here because TelegramBot takes the agent in its constructor.
+    _agent.telegram = _telegram_bot
     await _telegram_bot.start()
 
-    # Proactive Service + ligar telegram_bot al insight_service ya creado
+    # Skill manager, shared by ProactiveService and TickHandler
+    from app.agent.skill_manager import SkillManager
+    _tick_skill_manager = SkillManager(
+        firestore_client=firestore_client,
+        collection_prefix=settings.firestore_collection_prefix,
+    )
+    _proactive_cfg: dict = {}
+    for _sk in _tick_skill_manager.load_all():
+        if _sk["name"] == "proactive":
+            _proactive_cfg = _sk.get("config") or {}
+            break
+
+    # Proactive service, and wire the bot into the insight service built above
     global _proactive_service, _insight_service
     if insight_service_local is not None:
         insight_service_local.telegram = _telegram_bot
@@ -210,30 +228,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             notion_service=_notion_service,
             telegram_bot=_telegram_bot,
             genai_client=insights_genai,
+            agent=_agent,
+            skill_manager=_tick_skill_manager,
             collection_prefix=settings.firestore_collection_prefix,
             user_id=settings.user_id,
+            config=_proactive_cfg,
         )
 
     # Tick Handler (replaces individual Cloud Scheduler jobs)
     global _tick_handler
-    from app.agent.skill_manager import SkillManager
-    _tick_skill_manager = SkillManager(
-        firestore_client=firestore_client,
-        collection_prefix=settings.firestore_collection_prefix,
-    )
     _tick_handler = TickHandler(
         skill_manager=_tick_skill_manager,
         planner=_planner_agent,
         proactive=_proactive_service,
         insights=_insight_service,
         agent=_agent,
-        task_scheduler=_task_scheduler,
+        agent_queue=_agent_queue,
         telegram_bot=_telegram_bot,
         calendar_service=_calendar_service,
         user_timezone=settings.user_timezone,
     )
 
-    # Registrar webhook si la URL pública está configurada
+    # Register the webhook when a public URL is configured
     if settings.telegram_webhook_url and settings.telegram_webhook_secret:
         webhook_url = f"{settings.telegram_webhook_url.rstrip('/')}/api/v1/telegram/webhook"
         await _telegram_bot.set_webhook(
@@ -241,7 +257,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             secret_token=settings.telegram_webhook_secret,
         )
 
-    # TODO: Descomentar cuando se active ESP32
+    # TODO: uncomment when voice input is enabled
     # _stt_service = STTService(api_key=settings.groq_api_key)
     # _storage_service = StorageService(
     #     bucket_name=settings.gcs_bucket_name,
@@ -257,7 +273,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await _telegram_bot.stop()
     if _notion_service:
         await _notion_service.close()
-    # TODO: Descomentar cuando se active ESP32
+    # TODO: uncomment when voice input is enabled
     # if _stt_service:
     #     await _stt_service.close()
 
@@ -271,7 +287,7 @@ app = FastAPI(
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restringir en producción
+    allow_origins=["*"],  # Restrict in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -289,7 +305,7 @@ async def health_check() -> HealthResponse:
 
 @app.post("/api/v1/chat", response_model=AgentResponse)
 async def process_chat(body: ChatRequest) -> AgentResponse:
-    """Recibe texto y procesa con el agente (uso interno/debug)."""
+    """Receive text and run it through the agent (internal/debug)."""
     assert _agent is not None
 
     response = await _agent.process(body.message, source="api")
@@ -300,7 +316,7 @@ async def process_chat(body: ChatRequest) -> AgentResponse:
 async def proactive_trigger(
     x_proactive_secret: str = Header(default=""),
 ) -> dict:
-    """Llamado por Cloud Scheduler cada hora. Detecta triggers y manda mensajes."""
+    """Hourly proactive cycle. Detects triggers and sends messages."""
     settings = get_settings()
 
     if not settings.proactive_secret or x_proactive_secret != settings.proactive_secret:
@@ -309,7 +325,7 @@ async def proactive_trigger(
     if _proactive_service is None:
         return {"ok": False, "reason": "proactive service not initialized"}
 
-    # Hora local del usuario
+    # The user's local hour
     try:
         from zoneinfo import ZoneInfo
         now = datetime.now(ZoneInfo(settings.user_timezone))
@@ -325,7 +341,7 @@ async def proactive_trigger(
 async def weekly_analysis(
     x_proactive_secret: str = Header(default=""),
 ) -> dict:
-    """Llamado por Cloud Scheduler domingo 8pm. Analiza última semana."""
+    """Weekly analysis over the last 7 days."""
     settings = get_settings()
 
     if not settings.proactive_secret or x_proactive_secret != settings.proactive_secret:
@@ -360,7 +376,7 @@ async def tick(
 async def planner_plan_tomorrow(
     x_proactive_secret: str = Header(default=""),
 ) -> dict:
-    """Llamado por Cloud Scheduler 23pm Lima. Planner genera plan para mañana."""
+    """Ask the planner to build tomorrow's plan."""
     settings = get_settings()
     if not settings.proactive_secret or x_proactive_secret != settings.proactive_secret:
         raise HTTPException(status_code=403, detail="Invalid secret")
@@ -369,21 +385,7 @@ async def planner_plan_tomorrow(
     result = await _planner_agent.plan_day()
     if _telegram_bot is not None:
         summary = result.get("summary", "")[:1500]
-        await _telegram_bot.send_proactive_message(f"📅 *Plan de mañana listo*\n\n{summary}")
-    return {"ok": True, **result}
-
-
-@app.post("/api/v1/planner/verify")
-async def planner_verify(
-    x_proactive_secret: str = Header(default=""),
-) -> dict:
-    """Llamado cada 2h. Verifica cumplimiento de bloques pasados."""
-    settings = get_settings()
-    if not settings.proactive_secret or x_proactive_secret != settings.proactive_secret:
-        raise HTTPException(status_code=403, detail="Invalid secret")
-    if _planner_agent is None:
-        return {"ok": False, "reason": "planner not initialized"}
-    result = await _planner_agent.verify_recent()
+        await _telegram_bot.send_proactive_message(f"📅 *Tomorrow's plan is ready*\n\n{summary}")
     return {"ok": True, **result}
 
 
@@ -391,14 +393,14 @@ async def planner_verify(
 async def planner_daily_review(
     x_proactive_secret: str = Header(default=""),
 ) -> dict:
-    """Llamado por Cloud Scheduler 22pm Lima. Pregunta al usuario qué bloques completó."""
+    """Ask the user which of today's blocks they completed."""
     settings = get_settings()
     if not settings.proactive_secret or x_proactive_secret != settings.proactive_secret:
         raise HTTPException(status_code=403, detail="Invalid secret")
     if _telegram_bot is None:
         return {"ok": False, "reason": "telegram not initialized"}
 
-    # Listar bloques del día para incluirlos en la pregunta
+    # List the day's blocks so they can be included in the question
     blocks_text = ""
     if _calendar_service is not None:
         try:
@@ -430,7 +432,7 @@ async def telegram_webhook(
     request: Request,
     x_telegram_bot_api_secret_token: str = Header(default=""),
 ) -> dict:
-    """Recibe updates de Telegram vía webhook."""
+    """Receive Telegram updates over the webhook."""
     assert _telegram_bot is not None
     settings = get_settings()
 
@@ -444,7 +446,7 @@ async def telegram_webhook(
 
 @app.get("/api/v1/context", response_model=ContextResponse)
 async def get_context() -> ContextResponse:
-    """Retorna el contexto actual: agenda, tareas de hoy, metas activas."""
+    """Return the current context: today's tasks and active goals."""
     assert _notion_service is not None
 
     today_str = date.today().isoformat()
@@ -458,13 +460,13 @@ async def get_context() -> ContextResponse:
     )
 
 
-# TODO: Descomentar cuando se active ESP32 + voice
+# TODO: uncomment when voice input is enabled
 # @app.post("/api/v1/voice", response_model=AgentResponse)
 # async def process_voice(
 #     request: Request,
 #     source: str = Depends(verify_request),
 # ) -> AgentResponse:
-#     """Recibe audio WAV/WebM, transcribe y procesa con el agente."""
+#     """Receive WAV/WebM audio, transcribe it and run the agent."""
 #     assert _stt_service is not None
 #     assert _agent is not None
 #     assert _storage_service is not None
@@ -473,7 +475,7 @@ async def get_context() -> ContextResponse:
 #     audio_data = await request.body()
 #
 #     if not audio_data:
-#         return AgentResponse(message="No se recibió audio.", source=source)
+#         return AgentResponse(message="No audio received.", source=source)
 #
 #     import asyncio
 #     asyncio.create_task(
@@ -483,7 +485,7 @@ async def get_context() -> ContextResponse:
 #     transcription = await _stt_service.transcribe(audio_data, content_type)
 #     if not transcription:
 #         return AgentResponse(
-#             message="No pude entender el audio. ¿Puedes repetir?",
+#             message="I could not understand the audio. Could you repeat it?",
 #             source=source,
 #         )
 #
@@ -496,7 +498,7 @@ async def get_context() -> ContextResponse:
 #     body: ChatRequest,
 #     source: str = Depends(verify_request),
 # ) -> StreamingResponse:
-#     """Recibe texto y retorna SSE streaming."""
+#     """Receive text and return an SSE stream."""
 #     assert _agent is not None
 #     async def event_generator() -> AsyncGenerator[str, None]:
 #         async for chunk in _agent.process_stream(body.message, source=source):
@@ -508,11 +510,11 @@ async def get_context() -> ContextResponse:
 #     )
 
 
-# ── Helpers de inicialización ────────────────────────────────────────────────
+# ── Initialisation helpers ───────────────────────────────────────────────────
 
 
 def _init_firestore(settings: Settings):
-    """Inicializa Firestore client. Retorna None si no está disponible."""
+    """Initialise the Firestore client. Returns None when unavailable."""
     if not settings.gcp_project_id:
         logger.warning("GCP project not configured, Firestore disabled")
         return None
@@ -525,7 +527,7 @@ def _init_firestore(settings: Settings):
 
 
 def _build_genai_client(settings: Settings):
-    """Crea cliente Gemini compartido (Vertex si hay project, AI Studio si solo api key)."""
+    """Build the shared Gemini client (Vertex when a project is set, else AI Studio)."""
     try:
         from google import genai
         if settings.gcp_project_id:
@@ -544,7 +546,7 @@ def _build_genai_client(settings: Settings):
 
 
 def _init_tagging_service(settings: Settings):
-    """Crea TaggingService con cliente Gemini Flash."""
+    """Build the TaggingService with a Gemini Flash client."""
     client = _build_genai_client(settings)
     if client is None:
         return None
@@ -552,7 +554,7 @@ def _init_tagging_service(settings: Settings):
 
 
 def _init_mem0(settings: Settings):
-    """Inicializa Mem0 client. Retorna None si no está disponible."""
+    """Initialise the Mem0 client. Returns None when unavailable."""
     if not settings.mem0_api_key:
         logger.warning("Mem0 API key not configured, episodic memory disabled")
         return None
@@ -565,14 +567,14 @@ def _init_mem0(settings: Settings):
 
 
 def _configure_logging(settings: Settings) -> None:
-    """Configura logging estructurado."""
+    """Configure structured logging."""
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
     logging.basicConfig(
         level=level,
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    # Reducir ruido de librerías externas
+    # Quieten noisy third-party loggers
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("google").setLevel(logging.WARNING)

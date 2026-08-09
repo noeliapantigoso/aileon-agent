@@ -1,8 +1,9 @@
 """
-Selector de principios destilados (Jordan Peterson knowledge base).
+Distilled principles knowledge base.
 
-Carga principios desde Firestore y selecciona los más relevantes para el
-mensaje del usuario y su perfil de personalidad usando matching de keywords.
+Loads principles from Firestore and hands them all to the model, which picks the
+ones that genuinely apply to the current message. The `applies_when` field is a
+hint for the model, not a filter.
 """
 
 from __future__ import annotations
@@ -14,11 +15,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-CACHE_TTL_SECONDS = 60 * 60  # 1 hora — principios casi nunca cambian
+CACHE_TTL_SECONDS = 60 * 60  # 1 hour — principles almost never change
 
 
 def _normalize(text: str) -> str:
-    """Lowercase + sin tildes para matching robusto."""
+    """Lowercase and strip accents, for robust matching."""
     text = text.lower()
     return "".join(
         c for c in unicodedata.normalize("NFD", text)
@@ -27,7 +28,7 @@ def _normalize(text: str) -> str:
 
 
 class PrincipleService:
-    """Gestiona la carga y selección de principios desde Firestore."""
+    """Loads and caches the principles stored in Firestore."""
 
     def __init__(self, firestore_client: Any, collection_prefix: str = "assistant") -> None:
         self.db = firestore_client
@@ -36,7 +37,7 @@ class PrincipleService:
         self._cache_ts: float = 0.0
 
     def _load_principles(self) -> list[dict[str, Any]]:
-        """Carga todos los principios (cacheado)."""
+        """Load every principle (cached)."""
         now = time.time()
         if self._cache and (now - self._cache_ts) < CACHE_TTL_SECONDS:
             return self._cache
@@ -56,30 +57,10 @@ class PrincipleService:
         return self._cache
 
     def get_all(self) -> list[dict[str, Any]]:
-        """Devuelve todos los principios. Gemini decide cuáles usar."""
+        """Return every principle. The model decides which ones to use."""
         return self._load_principles()
 
-    def _extract_profile_traits(self, profile: dict[str, Any]) -> set[str]:
-        """Extrae rasgos del perfil para matching contra personality_relevance."""
-        traits: set[str] = set()
-
-        struggles = profile.get("current_struggles", [])
-        if isinstance(struggles, list):
-            traits.update(struggles)
-
-        # Big 5 — convertir scores a labels si están presentes
-        big5 = profile.get("personality", {}).get("big5", {})
-        if isinstance(big5, dict):
-            for trait_name, score in big5.items():
-                if isinstance(score, (int, float)):
-                    if score >= 70:
-                        traits.add(f"high_{trait_name.lower()}")
-                    elif score <= 30:
-                        traits.add(f"low_{trait_name.lower()}")
-
-        return traits
-
     def invalidate_cache(self) -> None:
-        """Limpia cache. Útil tras reseed."""
+        """Clear the cache. Useful after a reseed."""
         self._cache = []
         self._cache_ts = 0.0

@@ -1,8 +1,8 @@
 """
-Servicio de Telegram Bot para recibir mensajes de texto.
+Telegram bot service for receiving and sending text messages.
 
-Usa python-telegram-bot con polling (no necesita webhook ni dominio público).
-Solo acepta mensajes del user ID autorizado (un solo usuario).
+Runs in webhook mode. Only accepts messages from the authorised user id.
+A second, optional bot writes the internal activity log to a separate chat.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ _TELEGRAM_LIMIT = 4096
 
 
 def _split_message(text: str, limit: int = _TELEGRAM_LIMIT) -> list[str]:
-    """Divide texto en chunks respetando párrafos y el límite de Telegram."""
+    """Split text into chunks, respecting paragraphs and Telegram's size limit."""
     if len(text) <= limit:
         return [text]
 
@@ -38,13 +38,13 @@ def _split_message(text: str, limit: int = _TELEGRAM_LIMIT) -> list[str]:
             chunks.append(text)
             break
 
-        # Buscar el último salto de línea dentro del límite
+        # Find the last newline within the limit
         cut = text.rfind("\n", 0, limit)
         if cut <= 0:
-            # No hay salto de línea: cortar en el último espacio
+            # No newline available: cut at the last space
             cut = text.rfind(" ", 0, limit)
         if cut <= 0:
-            # Sin espacio tampoco: corte duro
+            # No space either: hard cut
             cut = limit
 
         chunks.append(text[:cut].rstrip())
@@ -54,7 +54,7 @@ def _split_message(text: str, limit: int = _TELEGRAM_LIMIT) -> list[str]:
 
 
 class TelegramBot:
-    """Bot de Telegram que recibe texto y lo procesa con el agente."""
+    """Telegram bot that receives text and hands it to the agent."""
 
     def __init__(
         self,
@@ -62,15 +62,20 @@ class TelegramBot:
         allowed_user_id: int,
         agent: ProductivityAgent,
         memory_manager: Any = None,
+        log_bot_token: str = "",
+        log_chat_id: str = "",
     ) -> None:
         self._token = token
         self._allowed_user_id = allowed_user_id
         self._agent = agent
         self._memory = memory_manager
+        self._log_bot_token = log_bot_token
+        self._log_chat_id = log_chat_id or str(allowed_user_id)
+        self._log_bot: Any = None
         self._app: Application | None = None
 
     async def start(self) -> None:
-        """Inicializa el bot para recibir updates por webhook."""
+        """Initialise the bot to receive updates over a webhook."""
         self._app = (
             Application.builder()
             .token(self._token)
@@ -93,14 +98,19 @@ class TelegramBot:
         logger.info("Telegram bot started (webhook mode)")
 
     async def stop(self) -> None:
-        """Detiene el bot."""
+        """Stop the bot."""
         if self._app:
             await self._app.stop()
             await self._app.shutdown()
             logger.info("Telegram bot stopped")
+        if self._log_bot is not None:
+            try:
+                await self._log_bot.shutdown()
+            except Exception:
+                pass
 
     async def process_update(self, update_data: dict) -> None:
-        """Procesa un update recibido por webhook."""
+        """Process one update received over the webhook."""
         if self._app is None:
             logger.error("Bot not initialized, skipping update")
             return
@@ -108,7 +118,7 @@ class TelegramBot:
         await self._app.process_update(update)
 
     async def set_webhook(self, url: str, secret_token: str) -> None:
-        """Registra el webhook URL en Telegram."""
+        """Register the webhook URL with Telegram."""
         if self._app is None:
             return
         await self._app.bot.set_webhook(
@@ -118,8 +128,39 @@ class TelegramBot:
         )
         logger.info("Telegram webhook registered: %s", url)
 
+    async def _get_log_bot(self) -> Any:
+        """Lazily built log bot (its own token, separate from the main one)."""
+        if not self._log_bot_token:
+            return None
+        if self._log_bot is None:
+            from telegram import Bot
+            bot = Bot(token=self._log_bot_token)
+            await bot.initialize()
+            self._log_bot = bot
+        return self._log_bot
+
+    async def send_log_message(self, text: str) -> None:
+        """
+        Write to the activity log chat, separate from the user's conversation.
+
+        Never stored in history or memory: the agent must not see it as part of the
+        conversation. If no log bot is configured this is a no-op. It never raises —
+        the log must not be able to break the cycle.
+        """
+        try:
+            bot = await self._get_log_bot()
+            if bot is None:
+                return
+            await bot.send_message(
+                chat_id=self._log_chat_id,
+                text=text[:_TELEGRAM_LIMIT],
+                disable_notification=True,
+            )
+        except Exception as exc:
+            logger.warning("Could not write to log chat: %s", exc)
+
     async def send_proactive_message(self, text: str) -> None:
-        """Envía un mensaje al usuario autorizado sin que haya respondido antes."""
+        """Send a message to the authorised user without them having written first."""
         if self._app is None:
             logger.error("Bot not initialized, cannot send proactive message")
             return
@@ -146,7 +187,7 @@ class TelegramBot:
             except Exception as exc:
                 logger.error("Failed to send proactive message: %s", exc)
 
-        # Guardar en historial para que el agente sepa que lo envió y no fue respondido
+        # Record it in history so the agent knows it sent this and got no reply
         if sent and self._memory is not None:
             try:
                 await self._memory.save_proactive_message(text)
@@ -156,7 +197,7 @@ class TelegramBot:
     # ── Guards ───────────────────────────────────────────────────────────────
 
     def _is_authorized(self, update: Update) -> bool:
-        """Verifica que el mensaje viene del usuario autorizado."""
+        """Check that the message comes from the authorised user."""
         user_id = update.effective_user.id if update.effective_user else None
         if user_id != self._allowed_user_id:
             logger.warning("Unauthorized Telegram user: %s", user_id)
@@ -170,23 +211,23 @@ class TelegramBot:
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        """Comando /start — saludo inicial."""
+        """/start command — initial greeting."""
         if not self._is_authorized(update):
-            await update.message.reply_text("No autorizado.")
+            await update.message.reply_text("Not authorised.")
             return
 
         await update.message.reply_text(
-            "¡Hola! Soy tu asistente de productividad. 🧠\n\n"
-            "Escríbeme lo que necesites:\n"
-            "• Crear tareas\n"
-            "• Guardar notas o ideas\n"
-            "• Organizar tu día\n"
-            "• Consultar pendientes\n"
-            "• Ver tus metas\n\n"
-            "Comandos rápidos:\n"
-            "/tareas — Ver tareas pendientes\n"
-            "/agenda — Ver agenda de hoy\n"
-            "/metas — Ver metas activas"
+            "Hi! I'm your productivity assistant. 🧠\n\n"
+            "Just tell me what you need:\n"
+            "• Create tasks\n"
+            "• Organise your day\n"
+            "• Check what is pending\n"
+            "• Review your goals\n\n"
+            "I reply in whatever language you write in.\n\n"
+            "Shortcuts:\n"
+            "/tareas — pending tasks\n"
+            "/agenda — today's agenda\n"
+            "/metas — active goals"
         )
 
     async def _handle_tareas(
@@ -194,7 +235,7 @@ class TelegramBot:
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        """Comando /tareas — atajo para ver pendientes."""
+        """/tareas command — shortcut for pending tasks."""
         if not self._is_authorized(update):
             return
         await self._process_and_reply(update, "¿Cuáles son mis tareas pendientes?")
@@ -204,7 +245,7 @@ class TelegramBot:
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        """Comando /agenda — atajo para ver agenda de hoy."""
+        """/agenda command — shortcut for today's agenda."""
         if not self._is_authorized(update):
             return
         await self._process_and_reply(update, "¿Cómo está mi agenda de hoy?")
@@ -214,7 +255,7 @@ class TelegramBot:
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        """Comando /metas — atajo para ver metas activas."""
+        """/metas command — shortcut for active goals."""
         if not self._is_authorized(update):
             return
         await self._process_and_reply(update, "Muéstrame mis metas activas")
@@ -224,7 +265,7 @@ class TelegramBot:
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        """Procesa cualquier mensaje de texto libre."""
+        """Handle any free-text message."""
         if not self._is_authorized(update):
             return
 
@@ -240,8 +281,8 @@ class TelegramBot:
         update: Update,
         message: str,
     ) -> None:
-        """Envía el mensaje al agente y responde en Telegram."""
-        # Indicador de "escribiendo..."
+        """Hand the message to the agent and reply on Telegram."""
+        # "typing..." indicator
         await update.message.chat.send_action("typing")
 
         try:
@@ -249,14 +290,14 @@ class TelegramBot:
 
             reply = response.message
 
-            # Si hubo acciones, agregar resumen breve
+            # When tools ran, append a short summary
             if response.actions_taken:
                 actions_summary = ", ".join(
                     a.tool for a in response.actions_taken
                 )
                 reply += f"\n\n📋 _{actions_summary}_"
 
-            # Telegram tiene límite de 4096 chars por mensaje
+            # Telegram caps messages at 4096 chars
             chunks = _split_message(reply)
             for chunk in chunks:
                 try:
@@ -273,5 +314,5 @@ class TelegramBot:
         except Exception as exc:
             logger.error("Error processing Telegram message: %s", exc)
             await update.message.reply_text(
-                "Hubo un error procesando tu mensaje. Intenta de nuevo."
+                "Something went wrong processing your message. Try again."
             )

@@ -1,7 +1,7 @@
 """
-Configuración centralizada del asistente de productividad.
+Centralised configuration for the productivity assistant.
 
-Carga settings desde variables de entorno (Cloud Run / Secret Manager)
+Loads settings from environment variables (Cloud Run / Secret Manager).
 o desde un archivo .env para desarrollo local.
 """
 
@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Configuración de la aplicación vía variables de entorno."""
+    """Application settings, loaded from environment variables."""
 
     # --- API Keys ---
     # groq_api_key: str  # TODO: descomentar cuando se active ESP32 + STT
@@ -21,9 +21,13 @@ class Settings(BaseSettings):
 
     # --- Telegram ---
     telegram_bot_token: str
-    telegram_allowed_user_id: int  # Tu user ID de Telegram (seguridad)
-    telegram_webhook_secret: str = ""  # Secret token para validar webhooks
-    telegram_webhook_url: str = ""  # URL pública del webhook (Cloud Run)
+    telegram_allowed_user_id: int  # The only Telegram user id accepted
+    telegram_webhook_secret: str = ""  # Secret token used to validate webhooks
+    telegram_webhook_url: str = ""  # Public webhook URL (Cloud Run)
+    # Activity log: a secondary bot that writes to a separate chat, so the
+    # agent's internal log never mixes with the real conversation.
+    telegram_log_bot_token: str = ""
+    telegram_log_chat_id: str = ""  # Falls back to telegram_allowed_user_id
     proactive_secret: str = ""  # Secret para endpoint /proactive (Cloud Scheduler)
 
     # --- GCP ---
@@ -45,10 +49,10 @@ class Settings(BaseSettings):
     # --- Mem0 ---
     mem0_api_key: str = ""
 
-    # --- Usuario (hardcoded, un solo usuario) ---
-    user_name: str = "Noe"
+    # --- User (single-tenant deployment) ---
+    user_name: str = "User"
     user_timezone: str = "America/Lima"
-    user_id: str = "noe"
+    user_id: str = "user"
 
     # --- Server ---
     debug: bool = False

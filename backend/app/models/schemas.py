@@ -1,5 +1,5 @@
 """
-Modelos Pydantic para requests y responses del API.
+Pydantic models for API requests and responses.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ class HealthResponse(BaseModel):
 
 
 class ContextResponse(BaseModel):
-    """Contexto actual del usuario (agenda, tareas pendientes)."""
+    """The user's current context (agenda, pending tasks)."""
 
     today_tasks: list[dict] = Field(default_factory=list)
     active_goals: list[dict] = Field(default_factory=list)

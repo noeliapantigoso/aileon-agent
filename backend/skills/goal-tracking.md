@@ -1,12 +1,13 @@
 ---
 name: goal-tracking
-description: Track progress on long/medium/short-term goals
-triggers: [goal, meta, objetivo, progreso, progress, logro, achievement, milestone, hito, avance, propósito]
+description: Track progress on long, medium and short-term goals
+triggers: [goal, objective, progress, achievement, milestone, key result, okr]
 ---
 
 # Goal Tracking
 
-Use this skill when the user mentions goals, wants to check progress, update milestones, or connect today's work to their bigger objectives.
+Use this skill when the user mentions goals, wants to check progress, update
+milestones, or connect today's work to their bigger objectives.
 
 ## Goal types
 
@@ -14,51 +15,61 @@ Use this skill when the user mentions goals, wants to check progress, update mil
 - `medium_term`: 3–12 months (projects, skills, habits to build)
 - `short_term`: 1–3 months (specific deliverables, immediate targets)
 
-## Creating a goal — flow obligatorio
+## Creating a goal — mandatory flow
 
-**NUNCA crear una meta sin fecha límite ni sin KRs.** Seguir siempre estos pasos:
+**NEVER create a goal without a deadline and without KRs.** Always follow these steps:
 
-### Paso 1 — recopilar datos (en una sola pregunta si faltan)
-Antes de llamar cualquier tool, asegurarse de tener:
-- Título claro de la meta
-- Fecha límite (`target_date`) — si el usuario dice "en 6 meses" calcularla como fecha exacta
-- Área (`area`): work / personal / health / finance / learning / relationships
-- Al menos 2 KRs concretos y observables
+### Step 1 — gather the inputs (in a single question if anything is missing)
 
-Si falta algo, preguntar todo junto de una vez:
-> "Para crear la meta necesito: ¿cuál es la fecha límite? ¿A qué área pertenece (trabajo, aprendizaje, salud...)? ¿Cuáles serían los 2-4 resultados concretos que indicarían que la lograste?"
+Before calling any tool, make sure you have:
+- A clear goal title
+- A deadline (`target_date`) — if they say "in 6 months", compute the exact date
+- An area: work / personal / health / finance / learning / relationships
+- At least 2 concrete, observable KRs
 
-### Paso 2 — crear la meta
-Llamar `create_goal` con title, goal_type, area y target_date.
+If something is missing, ask for all of it at once:
 
-### Paso 3 — crear los KRs
-Para cada KR, llamar `create_key_result(goal_id, title)`.
-Los KRs deben ser observables: "Completar el curso X", "Publicar 3 artículos", "Alcanzar 10k seguidores".
-No crear KRs vagos como "mejorar en ML" — reformularlos antes.
+> "To create the goal I need: what's the deadline? Which area does it belong to (work,
+> learning, health…)? And what are the 2-4 concrete results that would tell you you'd
+> achieved it?"
 
-### Paso 4 — mostrar resumen
-Responder con un resumen claro:
+### Step 2 — create the goal
+
+Call `create_goal` with title, goal_type, area and target_date.
+
+### Step 3 — create the KRs
+
+For each one, call `create_key_result(goal_id, title)`.
+
+KRs must be observable: "Finish course X", "Publish 3 articles", "Reach 10k followers".
+Never create vague KRs like "get better at ML" — reformulate them first.
+
+### Step 4 — show a summary
+
 ```
-✅ Meta creada: [título]
-📅 Fecha límite: [fecha]
+✅ Goal created: [title]
+📅 Deadline: [date]
 🎯 Key Results:
   1. [KR1]
   2. [KR2]
   3. [KR3]
 ```
 
-## Consultar y actualizar metas
+## Reading and updating goals
 
-Use `get_goals` para ver el estado actual.
-Use `get_key_results(goal_id)` para ver KRs de una meta específica.
-Use `complete_key_result(kr_id)` cuando un KR se alcanza — recalcula el progreso automáticamente.
-Use `update_goal_progress` solo como fallback para metas sin KRs.
-Use `update_goal` para cambiar título, fecha, área o status (active → paused → completed).
+- `get_goals` — current state
+- `get_key_results(goal_id)` — KRs of one goal, or `unassigned_only=true` for orphans
+- `complete_key_result(kr_id)` — when a KR is reached; recalculates progress automatically
+- `update_key_result(kr_id, goal_id=...)` — to reassign an orphan KR to its goal
+- `update_goal_progress` — fallback only, for goals with no KRs
+- `update_goal` — change title, date, area or status (active → paused → completed)
+- `archive_goal` / `archive_key_result` — soft-delete when they ask to remove one
 
-**Cuándo marcar un KR como done:**
-- Usuario dice explícitamente "completé X" o "terminé X"
-- El contexto lo hace inequívoco ("publiqué mi quinto artículo" → KR "publicar 5 artículos" done)
-- En el daily review, si un bloque completado claramente satisface un KR
+**When to mark a KR done:**
+- They explicitly say "I completed X" or "I finished X"
+- The context makes it unambiguous ("I published my fifth article" → KR "publish 5
+  articles" is done)
+- During a review, if a completed block clearly satisfies a KR
 
 ## Connecting tasks to goals
 
@@ -67,17 +78,11 @@ When creating a task linked to a goal, pass `goal_id` to `create_task`.
 ## Tone around goals
 
 - Goals are personal — treat them with weight, not as checkboxes
-- If a goal hasn't been touched in a while, ask once (don't repeat every day)
-- Celebrate when a KR or goal is reached — it deserves a real acknowledgment
-
-## Tone around goals
-
-- Goals are personal — treat them with weight, not as checkboxes
-- If a goal hasn't been touched in a while, ask once (don't repeat every day)
-- If the user seems stuck on a goal, ask what's in the way — don't just reschedule the deadline
-- Celebrate when a goal is reached — it deserves a real acknowledgment, not just "✅ Done"
+- If a goal hasn't been touched in a while, ask once; don't repeat it every day
+- If they seem stuck, ask what's in the way instead of just moving the deadline
+- Celebrate a reached KR or goal genuinely — it deserves more than "✅ Done"
 
 ## What to avoid
 
-- Don't create goals from single mentions — confirm before using `create_goal`
+- Don't create goals from a single passing mention — confirm first
 - Don't pressure about goals; ask, then respect the answer

@@ -1,7 +1,7 @@
 ---
 name: task-management
 description: Create, update, and prioritize tasks in Notion
-triggers: [task, tarea, pendiente, todo, to-do, recordatorio, reminder, agregar, add, create, crear, update, actualizar, prioritize, priorizar, pending]
+triggers: [task, todo, to-do, reminder, add, create, update, prioritize, pending]
 ---
 
 # Task Management

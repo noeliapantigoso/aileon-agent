@@ -1,11 +1,15 @@
 """
-Constructor dinámico del system prompt para el agente.
+Dynamic system-prompt assembly for the agent.
 
-El prompt se ensambla en runtime para cada request, inyectando:
-- Perfil del usuario
-- Contexto temporal (fecha, hora, día)
-- Contexto de trabajo (agenda, tareas de hoy)
-- Memorias relevantes de Mem0
+The prompt is rebuilt on every request, injecting:
+- The user profile (free prose, no schema)
+- Temporal context (date, time, weekday)
+- Work context (today's agenda and tasks)
+- Relevant memories from Mem0
+
+`build_user_context` is the single place where "who the user is" is assembled.
+Chat, planner and weekly insights all pass it as their system instruction, so a
+new kind of fact about the user reaches all three by construction.
 """
 
 from __future__ import annotations
@@ -14,16 +18,105 @@ import json
 from datetime import datetime
 from typing import Any
 
-# Mapeo de días de la semana al español
-DAYS_ES = {
-    0: "lunes",
-    1: "martes",
-    2: "miércoles",
-    3: "jueves",
-    4: "viernes",
-    5: "sábado",
-    6: "domingo",
+WEEKDAYS = {
+    0: "Monday",
+    1: "Tuesday",
+    2: "Wednesday",
+    3: "Thursday",
+    4: "Friday",
+    5: "Saturday",
+    6: "Sunday",
 }
+
+
+def _humanize_key(key: str) -> str:
+    """'work_start' -> 'Work start'. Only used for calibration fields."""
+    return key.replace("_", " ").capitalize()
+
+
+def build_user_context(
+    user_profile: dict[str, Any],
+    current_datetime: datetime,
+    relevant_memories: list[str] | None = None,
+    relevant_principles: list[dict[str, Any]] | None = None,
+    active_insights: list[dict[str, Any]] | None = None,
+) -> str:
+    """
+    Who the user is. Shared by EVERY prompt that reasons about their life.
+
+    This is the only function that assembles user context. Chat, planner and
+    insights all pass it as `system_instruction`, so anything added here reaches
+    all of them by construction — nobody has to remember to wire it up again.
+
+    It contains nothing task-specific: no daily agenda, no skills, no chat
+    behaviour rules. Each caller adds those on top.
+    """
+    parts: list[str] = []
+
+    weekday = WEEKDAYS.get(current_datetime.weekday(), "")
+    parts.append(
+        f"## Current time\n\n"
+        f"- Date: {weekday}, {current_datetime.strftime('%B %d, %Y')}\n"
+        f"- Time: {current_datetime.strftime('%H:%M')}\n"
+        f"- Timezone: {current_datetime.tzname() or 'local'}"
+    )
+
+    # Profile: free prose, no fields. Injected whole, always.
+    entries = user_profile.get("entries") or []
+    if entries:
+        total = sum(len(e) for e in entries)
+        prof = [f"## User profile  ({len(entries)} entries, {total:,} chars)\n"]
+        prof.extend(f"- {e}" for e in entries)
+        parts.append("\n".join(prof))
+
+    # Calibration: what the system measured, not what the user stated.
+    calibration = user_profile.get("calibration") or {}
+    if calibration:
+        cal = ["## Calibration (measured by the weekly analysis, not self-reported)\n"]
+        for key, value in calibration.items():
+            if value not in (None, "", []):
+                cal.append(f"- {_humanize_key(key)}: {value}")
+        parts.append("\n".join(cal))
+
+    if relevant_memories:
+        mem = ["## Relevant memories\n"]
+        mem.append("Facts from earlier conversations that may be useful:\n")
+        mem.extend(f"{i}. {m}" for i, m in enumerate(relevant_memories, 1))
+        parts.append("\n".join(mem))
+
+    if active_insights:
+        ins = ["## Detected patterns (from past analyses)\n"]
+        ins.append(
+            "These were detected by analysing past interactions. TAKE THEM INTO "
+            "ACCOUNT — they are real data about the user, do not invent more. "
+            "Only mention one if it is directly relevant.\n"
+        )
+        for i in active_insights:
+            ins.append(
+                f"- **{i.get('title', '')}** ({i.get('category', '')}): "
+                f"{i.get('description', '')} -> {i.get('actionable', '')}"
+            )
+        parts.append("\n".join(ins))
+
+    if relevant_principles:
+        princ = ["## Knowledge base — available principles\n"]
+        princ.append(
+            "You have access to these distilled principles. READ THE MESSAGE AND "
+            "THE CONTEXT, then pick 1-3 that GENUINELY apply. If none apply, do "
+            "not force it — answer without invoking any.\n"
+        )
+        for i, p in enumerate(relevant_principles, 1):
+            applies = ", ".join(p.get("applies_when", []))
+            princ.append(
+                f"### {i}. {p.get('title', '')} (id: `{p.get('id', '')}`)\n"
+                f"**Principle:** {p.get('principle', '')}\n"
+                f"**Applies when:** {applies}\n"
+                f"**Concrete action:** {p.get('actionable', '')}\n"
+                f"**Quote:** \"{p.get('quote', '')}\""
+            )
+        parts.append("\n\n".join(princ))
+
+    return "\n\n---\n\n".join(parts)
 
 
 def build_system_prompt(
@@ -37,165 +130,56 @@ def build_system_prompt(
     active_experiments: list[dict[str, Any]] | None = None,
 ) -> str:
     """
-    Ensambla el system prompt completo con todo el contexto.
+    Assemble the full system prompt for a chat turn.
 
     Args:
-        user_profile: Perfil del usuario desde Firestore.
-        today_context: Agenda de hoy, tareas pendientes, etc.
-        relevant_memories: Memorias episódicas relevantes de Mem0.
-        current_datetime: Fecha y hora actual.
+        user_profile: Profile from Firestore ({entries, calibration}).
+        today_context: Today's agenda, pending tasks, active goals.
+        relevant_memories: Episodic memories retrieved from Mem0.
+        current_datetime: Current date and time in the user's timezone.
 
     Returns:
-        System prompt completo como string.
+        The complete system prompt.
     """
-    name = user_profile.get("name", "usuario")
-    occupation = user_profile.get("occupation", "")
-    productivity = user_profile.get("productivity", {})
-    preferences = user_profile.get("preferences", {})
-    comm_style = preferences.get("communication_style", "Directo y conciso.")
-
-    day_name = DAYS_ES.get(current_datetime.weekday(), "")
-    date_str = current_datetime.strftime("%d de %B de %Y")
-    time_str = current_datetime.strftime("%H:%M")
-
     sections = []
 
-    # ── 1. ROL Y PERSONALIDAD ────────────────────────────────────────────
-    sections.append(f"""## Rol y personalidad
+    # ── 1. ROLE ──────────────────────────────────────────────────────────
+    # No name and no communication style hardcoded here: both come from the
+    # profile, which is injected right below.
+    sections.append("""## Role
 
-Eres el asistente personal de productividad de {name}. Tu trabajo es ayudarle a \
-organizar su día, gestionar tareas, capturar ideas y mantener el foco en sus metas.
+You are the personal assistant of the user described below. You help \
+them to live a fulfilling life by acting as someone who is always rethinking about
+their behaviors, organising their day, managing tasks, capturing ideas and staying focused on their goals.
 
-Reglas de comunicación:
-- Responde SIEMPRE en inglés
-- Tutea al usuario
-- Tono: directo, eficiente, empático, con humor sutil cuando sea apropiado
-- Estilo: {comm_style}
-- Si es una acción simple (guardar nota, crear tarea), confirma brevemente: "✅ Guardado" o similar
-- Si es una pregunta, responde concisamente
-- Si es planificación, propón un plan estructurado
-- No repitas lo que el usuario dijo, actúa directamente""")
+Communication rules:
+- Reply in the SAME language the user writes to you in
+- Tone: direct, efficient, empathetic, with subtle humour when it fits
+- Follow the communication style stated in their profile
+- For a simple action (saving a note, creating a task), a short confirmation is enough
+- For a question, answer concisely
+- For planning, propose a structured plan
+- Do not repeat back what the user said — act on it""")
 
-    # ── 2. CONTEXTO TEMPORAL ─────────────────────────────────────────────
-    sections.append(f"""## Contexto temporal
+    # ── 2. USER CONTEXT (shared with planner and insights) ───────────────
+    sections.append(build_user_context(
+        user_profile=user_profile,
+        current_datetime=current_datetime,
+        relevant_memories=relevant_memories,
+        relevant_principles=relevant_principles,
+        active_insights=active_insights,
+    ))
 
-- Fecha: {day_name}, {date_str}
-- Hora actual: {time_str}
-- Zona horaria: America/Lima (UTC-5)""")
-
-    # ── 3. PERFIL DEL USUARIO ────────────────────────────────────────────
-    profile_lines = [f"## Perfil del usuario\n\n- Nombre: {name}"]
-    if occupation:
-        profile_lines.append(f"- Ocupación: {occupation}")
-
-    company = user_profile.get("company", "")
-    if company:
-        profile_lines.append(f"- Empresa: {company}")
-
-    if productivity:
-        peak = productivity.get("peak_hours", "")
-        if peak:
-            profile_lines.append(f"- Horas de mayor productividad: {peak}")
-        secondary = productivity.get("secondary_peak", "")
-        if secondary:
-            profile_lines.append(f"- Pico secundario: {secondary}")
-        low = productivity.get("low_energy_hours", "")
-        if low:
-            profile_lines.append(f"- Horas de baja energía: {low}")
-        work_start = productivity.get("work_start", "")
-        work_end = productivity.get("work_end", "")
-        if work_start and work_end:
-            profile_lines.append(f"- Horario de trabajo: {work_start} - {work_end}")
-        focus_block = productivity.get("preferred_focus_block_minutes")
-        if focus_block:
-            profile_lines.append(f"- Bloque de enfoque preferido: {focus_block} minutos")
-
-    # Metas del perfil
-    goals = user_profile.get("goals", {})
-    if goals:
-        for goal_type, goal_list in goals.items():
-            if goal_list:
-                label = goal_type.replace("_", " ").title()
-                profile_lines.append(f"- Metas ({label}):")
-                for g in goal_list:
-                    if isinstance(g, dict):
-                        profile_lines.append(f"  - {g.get('name', g)}")
-                    else:
-                        profile_lines.append(f"  - {g}")
-
-    # Struggles actuales
-    struggles = user_profile.get("current_struggles", [])
-    if struggles:
-        profile_lines.append(f"- Áreas de trabajo personal: {', '.join(struggles)}")
-
-    sections.append("\n".join(profile_lines))
-
-    # ── 3b. PERSONALIDAD ─────────────────────────────────────────────────
-    personality = user_profile.get("personality", {})
-    enneagram = personality.get("enneagram") if isinstance(personality, dict) else None
-    if enneagram and isinstance(enneagram, dict):
-        pers_lines = ["## Perfil de personalidad (Eneagrama)"]
-        pers_lines.append(
-            f"**Tipo {enneagram.get('type')}: {enneagram.get('name', '')}**"
-        )
-        if enneagram.get("subtype"):
-            pers_lines.append(f"Subtipo: {enneagram['subtype']}")
-
-        if enneagram.get("core_drive"):
-            pers_lines.append(f"\n**Motor central:** {enneagram['core_drive']}")
-
-        motivations = enneagram.get("core_motivations", [])
-        if motivations:
-            pers_lines.append("\n**Motivaciones:**")
-            for m in motivations:
-                pers_lines.append(f"- {m}")
-
-        fears = enneagram.get("core_fears", [])
-        if fears:
-            pers_lines.append("\n**Miedos:**")
-            for f in fears:
-                pers_lines.append(f"- {f}")
-
-        stress = enneagram.get("stress_patterns", {})
-        if stress:
-            pers_lines.append(
-                f"\n**Estrés se manifiesta como:** {stress.get('manifests_as', '')}"
-            )
-            trigger = stress.get("core_trigger")
-            if trigger:
-                pers_lines.append(f"**Trigger central:** {trigger}")
-
-        growth = enneagram.get("growth_path", {})
-        if growth:
-            pers_lines.append(f"\n**Trabajo de crecimiento:** {growth.get('core_work', '')}")
-            if growth.get("key_question"):
-                pers_lines.append(f"**Pregunta clave para ofrecer:** *{growth['key_question']}*")
-
-        traps = enneagram.get("common_traps", [])
-        if traps:
-            pers_lines.append("\n**Trampas comunes a vigilar:**")
-            for t in traps:
-                pers_lines.append(f"- {t}")
-
-        pers_lines.append(
-            "\n*Usa este perfil para personalizar tus respuestas: respeta sus miedos, "
-            "no refuerces validación externa vacía, ayúdala a balancear ambición con "
-            "autenticidad y bienestar. Ofrece la pregunta clave cuando sospeches que "
-            "está actuando por validación externa.*"
-        )
-
-        sections.append("\n".join(pers_lines))
-
-    # ── 4. AGENDA DE HOY ─────────────────────────────────────────────────
-    agenda_lines = ["## Contexto del día"]
+    # ── 3. TODAY ─────────────────────────────────────────────────────────
+    agenda_lines = ["## Today"]
 
     today_tasks = today_context.get("today_tasks", [])
     if today_tasks:
-        agenda_lines.append("\n### Tareas programadas para hoy:")
+        agenda_lines.append("\n### Tasks scheduled for today:")
         for task in today_tasks[:10]:
             status = task.get("status", "?")
             priority = task.get("priority", "")
-            title = task.get("title", "Sin título")
+            title = task.get("title", "Untitled")
             estimate = task.get("time_estimate", "")
             line = f"- [{status}] {title}"
             if priority:
@@ -204,14 +188,14 @@ Reglas de comunicación:
                 line += f" ~{estimate}min"
             agenda_lines.append(line)
     else:
-        agenda_lines.append("\nNo hay tareas programadas específicamente para hoy.")
+        agenda_lines.append("\nNothing specifically scheduled for today.")
 
     pending = today_context.get("pending_tasks", [])
     if pending:
-        agenda_lines.append("\n### Tareas pendientes (sin fecha):")
+        agenda_lines.append("\n### Pending tasks (no date):")
         for task in pending[:8]:
             priority = task.get("priority", "")
-            title = task.get("title", "Sin título")
+            title = task.get("title", "Untitled")
             line = f"- {title}"
             if priority:
                 line += f" ({priority})"
@@ -219,8 +203,10 @@ Reglas de comunicación:
 
     active_goals = today_context.get("active_goals", [])
     if active_goals:
-        agenda_lines.append("\n### Metas activas (todos los tipos):")
-        by_type: dict[str, list[dict[str, Any]]] = {"long_term": [], "medium_term": [], "short_term": [], "other": []}
+        agenda_lines.append("\n### Active goals (all horizons):")
+        by_type: dict[str, list[dict[str, Any]]] = {
+            "long_term": [], "medium_term": [], "short_term": [], "other": [],
+        }
         type_map_inv = {
             "Long Term": "long_term",
             "Medium Term": "medium_term",
@@ -231,10 +217,10 @@ Reglas de comunicación:
             by_type[t].append(g)
 
         labels = {
-            "long_term": "Largo plazo (1+ años)",
-            "medium_term": "Mediano plazo (3-12 meses)",
-            "short_term": "Corto plazo (1-3 meses)",
-            "other": "Otras",
+            "long_term": "Long term (1+ years)",
+            "medium_term": "Medium term (3-12 months)",
+            "short_term": "Short term (1-3 months)",
+            "other": "Other",
         }
         for key in ["long_term", "medium_term", "short_term", "other"]:
             goals_in_type = by_type[key]
@@ -242,76 +228,30 @@ Reglas de comunicación:
                 continue
             agenda_lines.append(f"\n**{labels[key]}:**")
             for g in goals_in_type[:6]:
-                title = g.get("title", "Sin título")
+                title = g.get("title", "Untitled")
                 progress = g.get("progress")
                 area = g.get("area", "")
                 target = g.get("target_date", "")
                 progress_pct = (
-                    f"{int(progress * 100)}%" if isinstance(progress, float) and progress <= 1
+                    f"{int(progress * 100)}%"
+                    if isinstance(progress, float) and progress <= 1
                     else (f"{progress}%" if progress else "0%")
                 )
                 line = f"- {title} [{progress_pct}]"
                 if area:
                     line += f" ({area})"
                 if target:
-                    line += f" → {target}"
+                    line += f" -> {target}"
                 agenda_lines.append(line)
 
     sections.append("\n".join(agenda_lines))
 
-    # ── 5. MEMORIAS RELEVANTES ───────────────────────────────────────────
-    if relevant_memories:
-        memory_lines = ["## Memorias relevantes\n"]
-        memory_lines.append(
-            "Información de conversaciones anteriores que puede ser útil:\n"
-        )
-        for i, memory in enumerate(relevant_memories, 1):
-            memory_lines.append(f"{i}. {memory}")
-        sections.append("\n".join(memory_lines))
-
-    # ── 5a. INSIGHTS DETECTADOS ──────────────────────────────────────────
-    if active_insights:
-        ins_lines = ["## Patrones detectados (de análisis previos)\n"]
-        ins_lines.append(
-            "Estos patrones fueron detectados analizando interacciones pasadas. "
-            "TENELOS EN CUENTA al responder — son datos del usuario, no inventes. "
-            "Mencionalos solo si son directamente relevantes al mensaje actual.\n"
-        )
-        for ins in active_insights:
-            ins_lines.append(
-                f"- **{ins.get('title', '')}** ({ins.get('category', '')}): "
-                f"{ins.get('description', '')} → {ins.get('actionable', '')}"
-            )
-        sections.append("\n".join(ins_lines))
-
-    # ── 5b. KNOWLEDGE BASE — PRINCIPIOS ──────────────────────────────────
-    if relevant_principles:
-        princ_lines = ["## Knowledge base — Principios disponibles\n"]
-        princ_lines.append(
-            "Tienes acceso a estos principios destilados de Jordan Peterson. "
-            "EVALUÁ EL MENSAJE Y EL CONTEXTO, después ELEGÍ 1-3 principios que "
-            "REALMENTE apliquen a esta situación específica y usalos para guiar "
-            "tu respuesta. Si NINGUNO aplica, no fuerces — respondé sin invocar "
-            "principios. No los cites textualmente a menos que la quote aporte "
-            "fuerza emocional al momento.\n"
-        )
-        for i, p in enumerate(relevant_principles, 1):
-            applies = ", ".join(p.get("applies_when", []))
-            princ_lines.append(
-                f"### {i}. {p.get('title', '')} (id: `{p.get('id', '')}`)\n"
-                f"**Principio:** {p.get('principle', '')}\n"
-                f"**Aplica cuando:** {applies}\n"
-                f"**Acción concreta:** {p.get('actionable', '')}\n"
-                f"**Quote:** \"{p.get('quote', '')}\""
-            )
-        sections.append("\n\n".join(princ_lines))
-
-    # ── 6. EXPERIMENTOS ACTIVOS ──────────────────────────────────────────
+    # ── 4. ACTIVE EXPERIMENTS ────────────────────────────────────────────
     if active_experiments:
-        exp_lines = ["## Experimentos activos\n"]
+        exp_lines = ["## Active experiments\n"]
         exp_lines.append(
-            "Estos son los experimentos personales que Noe está corriendo ahora. "
-            "Tenlos en cuenta cuando sea relevante — progreso, adherencia, siguientes check-ins.\n"
+            "Personal experiments the user is running right now. Take them into "
+            "account when relevant — progress, adherence, upcoming check-ins.\n"
         )
         for e in active_experiments:
             name = e.get("name", "")
@@ -324,61 +264,90 @@ Reglas de comunicación:
             adherence = ""
             if progress:
                 done = sum(1 for p in progress if p.get("did_it"))
-                adherence = f"{done}/{len(progress)} días ({int(done/len(progress)*100)}%)"
+                adherence = f"{done}/{len(progress)} days ({int(done / len(progress) * 100)}%)"
             line = f"- **{name}**"
             if hypothesis:
                 line += f": {hypothesis}"
             if start and duration:
-                line += f" | Inicio: {start}, {duration} días"
+                line += f" | Started: {start}, {duration} days"
             if check_in:
-                line += f" | Check-in c/{check_in}d"
+                line += f" | Check-in every {check_in}d"
             if next_check:
-                line += f" | Próximo: {next_check}"
+                line += f" | Next: {next_check}"
             if adherence:
-                line += f" | Adherencia: {adherence}"
+                line += f" | Adherence: {adherence}"
             exp_lines.append(line)
         sections.append("\n".join(exp_lines))
 
-    # ── 6b. SKILLS ACTIVAS ───────────────────────────────────────────────
+    # ── 5. ACTIVE SKILLS ─────────────────────────────────────────────────
     if active_skills:
         sections.append(active_skills)
 
-    # ── 7. INSTRUCCIONES DE COMPORTAMIENTO ───────────────────────────────
-    sections.append("""## Instrucciones de comportamiento
+    # ── 6. BEHAVIOUR ─────────────────────────────────────────────────────
+    sections.append("""## Behaviour
 
-- Para inputs de voz: puede haber errores de transcripción, interpreta con contexto
-- No siempre hace falta responder largo. "✅ Guardado" o "Listo, tarea creada" es válido para acciones simples
-- Si el usuario menciona algo personal (logro, frustración), reconócelo brevemente antes de actuar
-- Si detectas conflictos de horario o sobrecarga de tareas, advierte proactivamente
-- Al priorizar tareas, usa la matriz Eisenhower (urgente/importante)
-- Sugiere bloques de enfoque durante las horas de mayor productividad del usuario
-- Cuando organices un día, agrupa tareas similares y respeta los ciclos de energía
-- Si no entiendes algo o falta contexto, pregunta antes de asumir
-- Las fechas siempre en formato YYYY-MM-DD para las tools
+- Voice input may contain transcription errors — interpret with context
+- Not every reply needs to be long. A short confirmation is fine for simple actions
+- If the user mentions something personal (a win, a frustration), acknowledge it
+  briefly before acting
+- If you detect schedule conflicts or task overload, say so proactively
+- When prioritising, use the Eisenhower matrix (urgent / important)
+- Suggest focus blocks during the user's peak productivity hours
+- When organising a day, group similar tasks and respect energy cycles
+- If something is unclear or context is missing, ask before assuming
+- Dates always in YYYY-MM-DD format when calling tools
 
-## Regla crítica — Calendar y planificación
+## Response format — Telegram
 
-NUNCA respondas con un horario o plan en texto. Si el usuario pide organizar su día,
-planificar bloques, agregar algo al calendario o hacer un review, SIEMPRE llama a
-`delegate_to_planner`. Un plan en texto que no se ejecuta vía tool no existe en el
-calendario real del usuario. Sin excepción.
+Your replies are delivered through Telegram. Follow these formatting rules:
+- Plain text with emojis for structure. Do NOT use standard Markdown.
+- For bold use *text* (one asterisk), NOT **text** (two asterisks).
+- For lists use • or — with indentation, never `*` or `-` at the start of a line.
+- NEVER include `[tools_used: ...]` blocks or tool-call details in your reply.
+  That belongs to the internal history, not to the chat.
+- Short and direct. No large headings or formal sections unless the content
+  really calls for it.
 
-## Regla crítica — Memoria
+## Critical rule — Calendar and planning
 
-NUNCA digas "no tengo memorias" o "no sé nada de ti" sin antes llamar a `list_memories`.
-Si el usuario pregunta qué sabes de ellos, qué recuerdas, o pide ver su información,
-SIEMPRE llama a `list_memories` primero y basa tu respuesta en el resultado real.
-No inventes ni asumas — lee lo que hay.
+NEVER reply with a schedule or plan as text. If the user asks to organise their day,
+plan blocks, add something to the calendar or run a review, ALWAYS call
+`delegate_to_planner`. A plan written as text but never executed through a tool does
+not exist in their real calendar. No exceptions.
 
-## Skills — cuándo crear o actualizar una
+## Critical rule — Always say what you saved and where
+
+Every time you write something persistent — `remember_fact`, `update_my_profile`,
+`forget_about_me`, `forget_memory`, `save_skill`, `delete_skill` — you must say so in
+your reply, with the exact text and the destination. One line at the end is enough:
+
+  📌 Saved to your profile: "Trains 6 days a week, 1.5h per session"
+  🧠 Saved to memory: "The paper they are writing is about computer vision"
+  📝 Updated the `plan-day` skill: the window now runs until 11pm
+
+NEVER summarise it as "updated your preferences" or "I'll keep that in mind". The user
+cannot see what you stored, so if you do not quote it back they are blind to something
+that will change your behaviour in every conversation from now on.
+
+If you replaced an entry, show what was there before as well.
+If you decided NOT to save something, say nothing — this rule is only for writes.
+
+## Critical rule — Memory
+
+NEVER say "I have no memories" or "I don't know anything about you" without calling
+`list_memories` first. If the user asks what you know about them, what you remember,
+or to see their information, ALWAYS call `list_memories` and base your answer on the
+real result. Do not invent or assume — read what is actually there.
+
+## Skills — when to create or update one
 
 Call `save_skill` when you notice any of these:
-- The user corrects you about how to handle something ("no, when I say X you should do Y")
+- The user corrects you about how to handle something ("no, when I say X do Y")
 - You had to figure out a procedure that wasn't obvious and will likely repeat
 - The user asks you to "remember" a way of doing things
-- You realize an existing skill guide is wrong or incomplete
+- You realise an existing skill guide is wrong or incomplete
 
-When saving, generate the full SKILL.md content with proper frontmatter including
+When saving, generate the full SKILL.md content with proper frontmatter, including
 relevant `triggers` keywords so the skill loads automatically next time.""")
 
     return "\n\n".join(sections)

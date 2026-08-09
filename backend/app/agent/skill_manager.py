@@ -36,16 +36,22 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         return {}, text
     front = text[3:end].strip()
     body = text[end + 4:].strip()
-    meta: dict[str, Any] = {}
-    for line in front.splitlines():
-        if ":" in line:
-            key, _, val = line.partition(":")
-            raw = val.strip()
-            if raw.startswith("[") and raw.endswith("]"):
-                items = [x.strip().strip("\"'") for x in raw[1:-1].split(",")]
-                meta[key.strip()] = [i for i in items if i]
-            else:
-                meta[key.strip()] = raw.strip("\"'")
+    try:
+        import yaml
+        meta = yaml.safe_load(front) or {}
+        if not isinstance(meta, dict):
+            meta = {}
+    except Exception:
+        meta = {}
+        for line in front.splitlines():
+            if ":" in line:
+                key, _, val = line.partition(":")
+                raw = val.strip()
+                if raw.startswith("[") and raw.endswith("]"):
+                    items = [x.strip().strip("\"'") for x in raw[1:-1].split(",")]
+                    meta[key.strip()] = [i for i in items if i]
+                else:
+                    meta[key.strip()] = raw.strip("\"'")
     return meta, body
 
 
@@ -68,6 +74,7 @@ def _skill_from_text(text: str, name_fallback: str, source: str) -> dict[str, An
         "triggers": meta.get("triggers", []),
         "schedule": meta.get("schedule"),   # cron expression, e.g. "0 23 * * *"
         "job": meta.get("job"),             # built-in job handler, e.g. "planner.plan_day"
+        "config": meta.get("config") or {},  # service-level config values
         "body": body,
         "source": source,
         "content": text,

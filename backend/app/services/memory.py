@@ -1,10 +1,10 @@
 """
-Sistema de memoria de 4 capas para el agente de productividad.
+Four-layer memory system for the productivity agent.
 
-Capa 1 — Corto plazo: últimos mensajes de la conversación actual.
-Capa 2 — Contexto de trabajo: agenda de hoy, tareas pendientes (cache 5 min).
-Capa 3 — Perfil del usuario: documento en Firestore (largo plazo).
-Capa 4 — Memoria episódica: hechos extraídos con Mem0 (búsqueda semántica).
+Layer 1 — Short term: the most recent messages of the current conversation.
+Layer 2 — Work context: today's agenda and pending tasks (5 min cache).
+Layer 3 — User profile: a Firestore document of free prose (long term).
+Layer 4 — Episodic memory: facts stored in Mem0 (semantic search).
 """
 
 from __future__ import annotations
@@ -17,14 +17,20 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-SESSION_TIMEOUT_SECONDS = 30 * 60  # 30 minutos de inactividad → nueva sesión
-WORK_CONTEXT_TTL_SECONDS = 5 * 60  # Cache de contexto de trabajo: 5 minutos
+SESSION_TIMEOUT_SECONDS = 30 * 60  # 30 min idle -> new session
+WORK_CONTEXT_TTL_SECONDS = 5 * 60  # Work-context cache lifetime
 MAX_CONVERSATION_MESSAGES = 15
-MAX_RELEVANT_MEMORIES = 5
+# How many Mem0 memories are retrieved per message.
+# Mem0 returns exactly N ranked by similarity, with NO relevance floor: if only
+# 3 memories relate to the message, the other N-3 are weak filler the model
+# still reads as pertinent. Raising it trades precision for coverage, not just
+# tokens. Anything that must never fall below the cut does not belong here —
+# it belongs in the profile, which is always injected whole.
+MAX_RELEVANT_MEMORIES = 12
 
 
 class MemoryManager:
-    """Gestiona las 4 capas de memoria del agente."""
+    """Manages the agent's four memory layers."""
 
     def __init__(
         self,
@@ -32,7 +38,7 @@ class MemoryManager:
         mem0_client: Any,
         notion_service: Any,
         collection_prefix: str = "assistant",
-        user_id: str = "noe",
+        user_id: str = "user",
         principle_service: Any = None,
         tagging_service: Any = None,
         insight_service: Any = None,
@@ -46,19 +52,19 @@ class MemoryManager:
         self._prefix = collection_prefix
         self._user_id = user_id
 
-        # Capa 1: buffer de conversación en memoria
+        # Layer 1: in-memory conversation buffer
         self.conversation_buffer: list[dict[str, str]] = []
         self._last_activity: float = time.time()
 
-        # Cache de contexto de trabajo (capa 2)
+        # Work-context cache (layer 2)
         self._work_context_cache: Optional[dict] = None
         self._work_context_ts: float = 0.0
 
-    # ── API Principal ────────────────────────────────────────────────────────
+    # ── Public API ───────────────────────────────────────────────────────────
 
     async def get_full_context(self, user_message: str) -> dict[str, Any]:
         """
-        Carga todo el contexto necesario para el prompt_builder.
+        Load everything prompt_builder needs.
 
         Returns:
             {
@@ -70,11 +76,11 @@ class MemoryManager:
         """
         self._check_session_timeout()
 
-        # Si el buffer está vacío (cold start), recuperar últimos mensajes de Firestore
+        # On a cold start the buffer is empty: restore recent messages from Firestore
         if not self.conversation_buffer:
             await self._restore_buffer_from_firestore()
 
-        # Cargar en paralelo lo que se pueda
+        # Load in parallel what can be loaded in parallel
         profile_task = self._get_user_profile()
         context_task = self._get_work_context()
         memories_task = self._search_memories(user_message)
@@ -83,7 +89,7 @@ class MemoryManager:
             profile_task, context_task, memories_task
         )
 
-        # Principios — todos. Gemini decide cuáles usar.
+        # Principles — all of them. Gemini picks which ones apply.
         relevant_principles: list[dict[str, Any]] = []
         if self.principles is not None:
             try:
@@ -91,7 +97,7 @@ class MemoryManager:
             except Exception as exc:
                 logger.warning("Failed to load principles: %s", exc)
 
-        # Insights activos (patrones detectados en análisis semanales previos)
+        # Active insights (patterns detected by previous weekly analyses)
         active_insights: list[dict[str, Any]] = []
         if self.insights is not None:
             try:
@@ -109,7 +115,7 @@ class MemoryManager:
         }
 
     async def _restore_buffer_from_firestore(self) -> None:
-        """Carga las últimas interacciones de Firestore al buffer en memoria."""
+        """Load the latest interactions from Firestore into the in-memory buffer."""
         if self.db is None:
             return
         try:
@@ -123,7 +129,7 @@ class MemoryManager:
                 .stream()
             )
             interactions = [doc.to_dict() for doc in docs]
-            interactions.reverse()  # cronológico ascendente
+            interactions.reverse()  # oldest first
 
             for it in interactions:
                 ts = it.get("timestamp", "")
@@ -148,11 +154,11 @@ class MemoryManager:
         agent_response: str,
         actions_taken: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Guarda la interacción en todas las capas relevantes."""
+        """Save the interaction across every relevant layer."""
         self._last_activity = time.time()
         actions = actions_taken or []
 
-        # Capa 1: agregar al buffer de conversación
+        # Layer 1: append to the conversation buffer
         now_iso = datetime.now(timezone.utc).isoformat()
         self.conversation_buffer.append({"role": "user", "content": user_message, "timestamp": now_iso})
         self.conversation_buffer.append({
@@ -162,22 +168,105 @@ class MemoryManager:
             "timestamp": now_iso,
         })
 
-        # Mantener solo los últimos N mensajes
+        # Keep only the most recent N messages
         if len(self.conversation_buffer) > MAX_CONVERSATION_MESSAGES * 2:
             self.conversation_buffer = self.conversation_buffer[
                 -(MAX_CONVERSATION_MESSAGES * 2):
             ]
 
-        # Guardar en Firestore (historial persistente) y Mem0 (async)
+        # Persist to Firestore (durable history) and Mem0, in the background
         asyncio.create_task(
             self._persist_interaction(user_message, agent_response, actions)
         )
 
+    def save_day_priority(self, date_iso: str, priority: str) -> None:
+        """Store the user's priority for a specific date in Firestore."""
+        if self.db is None:
+            return
+        try:
+            self.db.collection(f"{self._prefix}_daily_context").document(date_iso).set(
+                {"priority": priority, "saved_at": datetime.now(timezone.utc).isoformat()},
+                merge=True,
+            )
+        except Exception as exc:
+            logger.warning("Failed to save day priority: %s", exc)
+
+    def get_day_priority(self, date_iso: str) -> str:
+        """Read the stored priority for a date. Returns '' when there is none."""
+        if self.db is None:
+            return ""
+        try:
+            doc = self.db.collection(f"{self._prefix}_daily_context").document(date_iso).get()
+            if doc.exists:
+                return doc.to_dict().get("priority", "")
+        except Exception as exc:
+            logger.warning("Failed to get day priority: %s", exc)
+        return ""
+
+    # Collections the agent may inspect. The prefix is added here, so there is no
+    # way to read anything outside the user's namespace.
+    READABLE_COLLECTIONS = (
+        "users",
+        "calibration",
+        "history",
+        "experiments",
+        "insights",
+        "principles",
+        "proactive_log",
+        "daily_context",
+        "agent_queue",
+        "skills",
+        "profile_history",
+    )
+
+    def read_storage(
+        self,
+        collection: str,
+        document_id: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """
+        Read raw Firestore documents so the agent can inspect them.
+
+        Read-only. Lets it answer questions like "what did you save in my profile"
+        or "why did you decide to message me yesterday" without the user having to
+        open the Google Cloud console.
+        """
+        if self.db is None:
+            return {"error": "Firestore unavailable"}
+        if collection not in self.READABLE_COLLECTIONS:
+            return {
+                "error": f"Unknown collection: {collection}",
+                "valid": list(self.READABLE_COLLECTIONS),
+            }
+
+        name = f"{self._prefix}_{collection}"
+        limit = max(1, min(limit, 50))
+
+        try:
+            if document_id:
+                doc = self.db.collection(name).document(document_id).get()
+                if not doc.exists:
+                    return {"collection": collection, "document_id": document_id, "found": False}
+                return {
+                    "collection": collection,
+                    "document_id": document_id,
+                    "found": True,
+                    "data": _truncate_doc(doc.to_dict() or {}),
+                }
+
+            docs = self.db.collection(name).limit(limit).stream()
+            items = [{"id": d.id, **_truncate_doc(d.to_dict() or {})} for d in docs]
+            return {"collection": collection, "count": len(items), "documents": items}
+        except Exception as exc:
+            logger.warning("read_storage failed for %s: %s", collection, exc)
+            return {"error": str(exc), "collection": collection}
+
     async def save_proactive_message(self, message: str) -> None:
-        """Guarda un mensaje proactivo enviado al usuario (sin respuesta del usuario)."""
+        """Record a proactive message sent to the user (no user turn precedes it)."""
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        # Agregar al buffer como mensaje del asistente sin turno de usuario
+        # Append as an assistant message with no matching user turn
         self.conversation_buffer.append({
             "role": "assistant",
             "content": message,
@@ -189,7 +278,7 @@ class MemoryManager:
         if len(self.conversation_buffer) > MAX_CONVERSATION_MESSAGES * 2:
             self.conversation_buffer = self.conversation_buffer[-(MAX_CONVERSATION_MESSAGES * 2):]
 
-        # Persistir en Firestore
+        # Persist to Firestore
         if self.db is not None:
             try:
                 self.db.collection(f"{self._prefix}_history").add({
@@ -202,21 +291,6 @@ class MemoryManager:
                 })
             except Exception as exc:
                 logger.warning("Failed to persist proactive message: %s", exc)
-
-    async def update_user_profile(self, updates: dict[str, Any]) -> None:
-        """Actualiza campos del perfil del usuario en Firestore."""
-        if self.db is None:
-            logger.warning("Firestore not available, skipping profile update")
-            return
-
-        try:
-            doc_ref = self.db.collection(f"{self._prefix}_users").document(
-                self._user_id
-            )
-            doc_ref.set(updates, merge=True)
-            logger.info("User profile updated: %s", list(updates.keys()))
-        except Exception as exc:
-            logger.error("Failed to update user profile: %s", exc)
 
     # ── Memory management (user-facing) ──────────────────────────────────────
 
@@ -266,27 +340,140 @@ class MemoryManager:
         self._work_context_cache = None
         self._work_context_ts = 0.0
 
-    # ── Capas Internas ───────────────────────────────────────────────────────
+    # ── Internal layers ──────────────────────────────────────────────────────
 
     async def _get_user_profile(self) -> dict[str, Any]:
-        """Capa 3: carga el perfil del usuario desde Firestore."""
+        """
+        Layer 3: the user profile.
+
+        Returns two deliberately separate things:
+          - entries:     free prose, no schema. What the user said about themselves.
+          - calibration: the few fields insights.py computes on (peak_hours,
+                         work_start, ...). These are the machine's measurements,
+                         not statements the user made.
+
+        Nothing the user says has to pick a field: it all goes to entries.
+        """
+        return {
+            "entries": self.get_profile_entries(),
+            "calibration": self.get_calibration(),
+        }
+
+    # ── Profile: prose entries (no schema) ───────────────────────────────────
+
+    def _profile_doc(self):
+        return self.db.collection(f"{self._prefix}_users").document(self._user_id)
+
+    def get_profile_entries(self) -> list[str]:
+        """Prose entries about the user. Always injected in full."""
         if self.db is None:
-            return _default_profile()
+            return list(DEFAULT_PROFILE_ENTRIES)
+        try:
+            doc = self._profile_doc().get()
+            if doc.exists:
+                data = doc.to_dict() or {}
+                entries = data.get("entries")
+                if isinstance(entries, list):
+                    return [str(e) for e in entries if e]
+        except Exception as exc:
+            logger.error("Failed to load profile entries: %s", exc)
+        return list(DEFAULT_PROFILE_ENTRIES)
+
+    def add_profile_entry(self, entry: str, replaces: str | None = None) -> dict[str, Any]:
+        """
+        Add an entry to the profile, or replace an existing one.
+
+        `replaces` accepts a partial match so the model does not have to reproduce
+        the previous text character by character.
+        """
+        entry = (entry or "").strip()
+        if not entry:
+            return {"error": "empty entry"}
+        if self.db is None:
+            return {"error": "Firestore unavailable"}
+
+        entries = self.get_profile_entries()
+        replaced = None
+
+        if replaces:
+            needle = replaces.strip().lower()
+            for i, existing in enumerate(entries):
+                if needle in existing.lower() or existing.lower() in needle:
+                    replaced = existing
+                    entries[i] = entry
+                    break
+            if replaced is None:
+                entries.append(entry)
+        else:
+            entries.append(entry)
 
         try:
-            doc_ref = self.db.collection(f"{self._prefix}_users").document(
-                self._user_id
-            )
-            doc = doc_ref.get()
-            if doc.exists:
-                return doc.to_dict()
+            self._profile_doc().set({"entries": entries}, merge=True)
         except Exception as exc:
-            logger.error("Failed to load user profile: %s", exc)
+            logger.error("Failed to save profile entry: %s", exc)
+            return {"error": str(exc)}
 
-        return _default_profile()
+        return {
+            "status": "replaced" if replaced else "added",
+            "entry": entry,
+            "replaced": replaced,
+            "total_entries": len(entries),
+            "total_chars": sum(len(e) for e in entries),
+        }
+
+    def remove_profile_entry(self, entry: str) -> dict[str, Any]:
+        """Remove a profile entry by partial match."""
+        if self.db is None:
+            return {"error": "Firestore unavailable"}
+        entries = self.get_profile_entries()
+        needle = (entry or "").strip().lower()
+        if not needle:
+            return {"error": "empty entry"}
+
+        kept = [e for e in entries if needle not in e.lower()]
+        if len(kept) == len(entries):
+            return {"status": "not_found", "entry": entry}
+        try:
+            self._profile_doc().set({"entries": kept}, merge=True)
+        except Exception as exc:
+            logger.error("Failed to remove profile entry: %s", exc)
+            return {"error": str(exc)}
+        return {"status": "removed", "removed_count": len(entries) - len(kept)}
+
+    # ── Calibration: what the machine measures (this one does have fields) ───
+
+    def _calibration_doc(self):
+        return self.db.collection(f"{self._prefix}_calibration").document(self._user_id)
+
+    def get_calibration(self) -> dict[str, Any]:
+        """
+        Fields derived from real behaviour, tuned weekly by insights.py.
+
+        They have structure because code reads them, recomputes them and writes
+        them back. That is the only reason a field exists here at all.
+        """
+        if self.db is None:
+            return dict(DEFAULT_CALIBRATION)
+        try:
+            doc = self._calibration_doc().get()
+            if doc.exists:
+                return {**DEFAULT_CALIBRATION, **(doc.to_dict() or {})}
+        except Exception as exc:
+            logger.warning("Failed to load calibration: %s", exc)
+        return dict(DEFAULT_CALIBRATION)
+
+    async def update_calibration(self, updates: dict[str, Any]) -> None:
+        """Write calibration fields. Only insights.py uses this."""
+        if self.db is None:
+            return
+        try:
+            self._calibration_doc().set(updates, merge=True)
+            logger.info("Calibration updated: %s", list(updates.keys()))
+        except Exception as exc:
+            logger.error("Failed to update calibration: %s", exc)
 
     async def _get_work_context(self) -> dict[str, Any]:
-        """Capa 2: contexto de trabajo del día (con cache TTL)."""
+        """Layer 2: today's work context (TTL-cached)."""
         now = time.time()
         if (
             self._work_context_cache is not None
@@ -324,7 +511,7 @@ class MemoryManager:
         return context
 
     async def _search_memories(self, query: str) -> list[str]:
-        """Capa 4: busca memorias episódicas relevantes en Mem0."""
+        """Layer 4: search Mem0 for relevant episodic memories."""
         if self.mem0 is None:
             return []
 
@@ -359,7 +546,7 @@ class MemoryManager:
         agent_response: str,
         actions: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Guarda interacción en Firestore y Mem0 (background)."""
+        """Persist the interaction to Firestore and Mem0 (background task)."""
         # Tagging vía Gemini Flash (no bloquea respuesta — ya estamos en background)
         tags: dict[str, Any] = {}
         if self.tagger is not None:
@@ -385,7 +572,7 @@ class MemoryManager:
             except Exception as exc:
                 logger.error("Failed to persist to Firestore: %s", exc)
 
-        # Mem0: extracción de hechos
+        # Mem0: fact extraction
         if self.mem0 is not None:
             try:
                 conversation = [
@@ -400,7 +587,7 @@ class MemoryManager:
                 logger.warning("Mem0 add failed: %s", exc)
 
     def _check_session_timeout(self) -> None:
-        """Limpia el buffer de conversación si pasó mucho tiempo sin actividad."""
+        """Clear the conversation buffer after a long enough idle gap."""
         now = time.time()
         if (now - self._last_activity) > SESSION_TIMEOUT_SECONDS:
             logger.info("Session timeout, clearing conversation buffer")
@@ -408,27 +595,44 @@ class MemoryManager:
         self._last_activity = now
 
 
-def _default_profile() -> dict[str, Any]:
-    """Perfil por defecto cuando Firestore no está disponible."""
-    return {
-        "name": "Noe",
-        "occupation": "Tech Consultant / Startup Co-founder",
-        "timezone": "America/Lima",
-        "language": "es",
-        "productivity": {
-            "peak_hours": "9:00-12:00",
-            "secondary_peak": "15:00-17:00",
-            "low_energy_hours": "13:00-15:00",
-            "work_start": "8:30",
-            "work_end": "18:00",
-            "preferred_focus_block_minutes": 90,
-            "break_reminder_minutes": 25,
-        },
-        "preferences": {
-            "communication_style": "Directo y conciso. Tutéame.",
-            "task_defaults": {
-                "priority": "p2",
-                "time_estimate_minutes": 30,
-            },
-        },
-    }
+def _truncate_doc(data: dict[str, Any], max_chars: int = 600) -> dict[str, Any]:
+    """
+    Truncate long values in a document before handing it to the model.
+
+    Without this, a single `history` document holding a long conversation can
+    eat a large share of the context window.
+    """
+    out: dict[str, Any] = {}
+    for key, value in data.items():
+        if isinstance(value, str) and len(value) > max_chars:
+            out[key] = value[:max_chars] + f"... [+{len(value) - max_chars} chars]"
+        elif isinstance(value, dict):
+            out[key] = _truncate_doc(value, max_chars)
+        elif isinstance(value, list) and len(value) > 20:
+            out[key] = value[:20] + [f"... [+{len(value) - 20} items]"]
+        else:
+            out[key] = value
+    return out
+
+
+# Seed profile used when Firestore is unavailable or the profile is empty.
+# Free prose: there are no fields to respect and no order to maintain.
+# Deliberately near-empty — the real profile is built from what the user tells
+# the agent, never from assumptions baked into the code.
+DEFAULT_PROFILE_ENTRIES: tuple[str, ...] = (
+    "No profile information has been recorded yet. Ask about their work, their "
+    "routines and how they want to be spoken to as it comes up naturally, and "
+    "store it with update_my_profile.",
+)
+
+# Los únicos campos con estructura de todo el sistema. Existen porque
+# insights.py los lee, los recalcula desde el comportamiento real y los
+# reescribe cada semana. Si algún día nada computa sobre uno, sobra.
+DEFAULT_CALIBRATION: dict[str, Any] = {
+    "peak_hours": "9:00-12:00",
+    "low_energy_hours": "13:00-15:00",
+    "work_start": "8:00",
+    "work_end": "23:00",
+    "preferred_focus_block_minutes": 90,
+    "estimation_calibration": 1.0,
+}
