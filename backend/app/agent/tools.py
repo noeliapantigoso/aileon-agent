@@ -646,6 +646,31 @@ TOOLS = [
         },
     },
     {
+        "name": "read_personality_type",
+        "description": (
+            "Read the reference guide for a personality type from the shared library. "
+            "Call this ONCE, when the user states their type and their profile has no "
+            "handling entry yet. Then condense the 'how to talk to them' part into their "
+            "profile with update_my_profile — the library file is the generic starting "
+            "point, their profile entry is the version that can be personalised.\n"
+            "Never call it to look up a type you inferred yourself: only when they "
+            "stated it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": (
+                        "The file key for the type, e.g. 'enneagram_3'. Format is "
+                        "framework_type. Call with no key to list what is available."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "get_user_profile",
         "description": (
             "Get the user's full profile and calibration. Use only when you need "

@@ -278,6 +278,28 @@ class ToolExecutor:
             collection=collection, document_id=document_id, limit=limit
         )
 
+    async def _read_personality_type(self, key: str | None = None) -> dict[str, Any]:
+        """
+        Read one file from the shared personality-type library.
+
+        The library ships with the code rather than living in the database: it is
+        reference knowledge, not user data, and it has to survive a change of host.
+        """
+        from pathlib import Path
+
+        library = Path(__file__).parent.parent.parent / "personality_types"
+        if not library.exists():
+            return {"error": "personality_types library not found"}
+
+        available = sorted(p.stem for p in library.glob("*.md") if p.stem != "README")
+        if not key:
+            return {"available": available}
+
+        path = library / f"{Path(key).stem}.md"
+        if not path.exists() or path.parent != library:
+            return {"error": f"Unknown type '{key}'", "available": available}
+        return {"key": path.stem, "content": path.read_text(encoding="utf-8")}
+
     async def _get_user_profile(self) -> dict[str, Any]:
         context = await self.memory.get_full_context("")
         return {"profile": context.get("user_profile", {})}
@@ -504,6 +526,7 @@ class ToolExecutor:
         "update_goal": _update_goal,
         "archive_goal": _archive_goal,
         "get_user_profile": _get_user_profile,
+        "read_personality_type": _read_personality_type,
         "read_storage": _read_storage,
         "start_experiment": _start_experiment,
         "log_experiment_progress": _log_experiment_progress,

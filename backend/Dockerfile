@@ -18,6 +18,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Copy application code
 COPY app ./app
 COPY skills ./skills
+COPY personality_types ./personality_types
 
 # Cloud Run uses PORT env var (default 8080)
 ENV PORT=8080
