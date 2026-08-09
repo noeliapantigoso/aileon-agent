@@ -27,8 +27,10 @@ from app.services.notion import NotionService
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 8
-MODEL_ID_VERTEX = "gemini-2.5-flash"
-MODEL_ID_AISTUDIO = "gemini-2.5-flash"
+
+# Fallback only. The real value comes from settings.gemini_model, passed in by
+# main.py, so the model can be changed with an env var and no code edit.
+DEFAULT_MODEL_ID = "gemini-2.5-pro"
 
 # Used when Gemini returns a response with no content. In the proactive cycle this
 # text is never sent to anyone: it only becomes the silence reason in the log.
@@ -82,6 +84,7 @@ class ProductivityAgent:
         planner: Any = None,
         calendar_service: Any = None,
         agent_queue: Any = None,
+        model_id: str = DEFAULT_MODEL_ID,
     ) -> None:
         if gcp_project_id:
             self._client = genai.Client(
@@ -89,10 +92,9 @@ class ProductivityAgent:
                 project=gcp_project_id,
                 location="us-central1",
             )
-            self._model_id = MODEL_ID_VERTEX
         else:
             self._client = genai.Client(api_key=gemini_api_key)
-            self._model_id = MODEL_ID_AISTUDIO
+        self._model_id = model_id
         self._notion = notion_service
         self._memory = memory_manager
         self._timezone = user_timezone

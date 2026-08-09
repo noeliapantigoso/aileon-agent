@@ -61,7 +61,7 @@ class ProactiveService:
         skill_manager: Any = None,
         collection_prefix: str = "assistant",
         user_id: str = "user",
-        model_id: str = "gemini-2.5-flash",
+        model_id: str = "gemini-2.5-pro",
         config: dict | None = None,
     ) -> None:
         self.db = firestore_client

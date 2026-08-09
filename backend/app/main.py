@@ -127,6 +127,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             genai_client=insights_genai,
             collection_prefix=settings.firestore_collection_prefix,
             user_id=settings.user_id,
+            model_id=settings.gemini_model,
             experiment_service=experiment_service,
             notion_service=_notion_service,
         )
@@ -164,8 +165,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             gemini_api_key=settings.gemini_api_key,
             gcp_project_id=settings.gcp_project_id,
             user_timezone=settings.user_timezone,
+            model_id=settings.gemini_model,
         )
-        logger.info("Planner agent initialized")
+        logger.info("Planner agent initialized (model=%s)", settings.gemini_model)
     else:
         logger.warning("Calendar token unavailable — planner disabled")
 
@@ -186,6 +188,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         planner=_planner_agent,
         calendar_service=_calendar_service,
         agent_queue=_agent_queue,
+        model_id=settings.gemini_model,
     )
 
     # Telegram Bot
@@ -550,7 +553,7 @@ def _init_tagging_service(settings: Settings):
     client = _build_genai_client(settings)
     if client is None:
         return None
-    return TaggingService(genai_client=client, model_id="gemini-2.5-flash")
+    return TaggingService(genai_client=client, model_id=settings.gemini_model_fast)
 
 
 def _init_mem0(settings: Settings):

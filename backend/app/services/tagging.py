@@ -54,7 +54,7 @@ JSON:"""
 class TaggingService:
     """Tags each interaction with metadata via Gemini Flash."""
 
-    def __init__(self, genai_client: Any, model_id: str = "gemini-2.5-flash") -> None:
+    def __init__(self, genai_client: Any, model_id: str = "gemini-2.5-flash-lite") -> None:
         self._client = genai_client
         self._model_id = model_id
 

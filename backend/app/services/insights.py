@@ -63,7 +63,7 @@ class InsightService:
         genai_client: Any,
         collection_prefix: str = "assistant",
         user_id: str = "user",
-        model_id: str = "gemini-2.5-flash",
+        model_id: str = "gemini-2.5-pro",
         memory_manager: Any = None,
         calendar_service: Any = None,
         experiment_service: Any = None,

@@ -16,6 +16,16 @@ class Settings(BaseSettings):
     # --- API Keys ---
     # groq_api_key: str  # TODO: descomentar cuando se active ESP32 + STT
     gemini_api_key: str = ""
+
+    # Which model does the reasoning: chat, planner and the weekly analysis.
+    # Override with the GEMINI_MODEL env var; no redeploy of code needed, just a
+    # variable change.
+    gemini_model: str = "gemini-2.5-pro"
+
+    # A cheaper model for work that is classification, not reasoning. Right now
+    # only the tagger, which runs on every single message and only has to fill in
+    # a small JSON. Paying reasoning prices there buys nothing.
+    gemini_model_fast: str = "gemini-2.5-flash-lite"
     notion_token: str
     # esp32_api_key: str  # TODO: descomentar cuando se active ESP32
 

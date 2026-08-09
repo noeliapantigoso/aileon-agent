@@ -24,8 +24,9 @@ from google.genai import types
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 10
-MODEL_ID_VERTEX = "gemini-2.5-flash"
-MODEL_ID_AISTUDIO = "gemini-2.5-flash"
+
+# Fallback only; the real value arrives from settings.gemini_model.
+DEFAULT_MODEL_ID = "gemini-2.5-pro"
 
 # ── Tools del planner ────────────────────────────────────────────────────────
 
@@ -325,6 +326,7 @@ class PlannerAgent:
         gemini_api_key: str = "",
         gcp_project_id: str = "",
         user_timezone: str = "America/Lima",
+        model_id: str = DEFAULT_MODEL_ID,
     ) -> None:
         if gcp_project_id:
             self._client = genai.Client(
@@ -332,10 +334,9 @@ class PlannerAgent:
                 project=gcp_project_id,
                 location="us-central1",
             )
-            self._model_id = MODEL_ID_VERTEX
         else:
             self._client = genai.Client(api_key=gemini_api_key)
-            self._model_id = MODEL_ID_AISTUDIO
+        self._model_id = model_id
 
         self._calendar = calendar_service
         self._notion = notion_service
