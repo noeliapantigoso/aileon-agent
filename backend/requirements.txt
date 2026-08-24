@@ -32,3 +32,6 @@ httpx>=0.25.0
 # TODO: Descomentar cuando se active ESP32 + voice + PWA auth
 # firebase-admin>=6.0.0
 # python-jose[cryptography]>=3.3.0
+
+# MCP client (optional integrations such as Notion)
+mcp>=1.9.0

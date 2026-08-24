@@ -35,6 +35,7 @@ class ToolExecutor:
         skill_manager: SkillManager | None = None,
         agent_queue: AgentTaskQueue | None = None,
         telegram: Any = None,
+        mcp_integrations: list[Any] | None = None,
     ) -> None:
         self.notion = notion
         self.memory = memory
@@ -45,6 +46,9 @@ class ToolExecutor:
         self._skills = skill_manager
         self._agent_queue = agent_queue
         self.telegram = telegram
+        # Tools discovered from MCP servers. Dispatched only after the
+        # hand-written handlers, so a local tool always wins a name clash.
+        self.mcp_integrations = mcp_integrations or []
 
     async def execute(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         """
@@ -61,6 +65,9 @@ class ToolExecutor:
 
         handler = self._handlers.get(tool_name)
         if handler is None:
+            for integration in self.mcp_integrations:
+                if integration.handles(tool_name):
+                    return await integration.call(tool_name, args)
             logger.error("Unknown tool: %s", tool_name)
             return {"error": f"Unknown tool: {tool_name}"}
 

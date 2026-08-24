@@ -85,6 +85,7 @@ class ProductivityAgent:
         calendar_service: Any = None,
         agent_queue: Any = None,
         model_id: str = DEFAULT_MODEL_ID,
+        mcp_integrations: list[Any] | None = None,
     ) -> None:
         if gcp_project_id:
             self._client = genai.Client(
@@ -113,6 +114,20 @@ class ProductivityAgent:
         if planner is not None:
             self._integrations.add("planner")
         self._tools = get_tools(self._integrations)
+
+        # Tools discovered from MCP servers join the same list. They are
+        # appended after the local ones so that, if a server ever publishes a
+        # name we already use, Gemini still sees ours first and the executor
+        # dispatches to it.
+        self._mcp = [i for i in (mcp_integrations or []) if i.connected]
+        local_names = {t["name"] for t in self._tools}
+        for integration in self._mcp:
+            self._integrations.add(f"mcp:{integration.name}")
+            for decl in integration.get_tool_declarations():
+                if decl["name"] not in local_names:
+                    self._tools.append(decl)
+                    local_names.add(decl["name"])
+
         logger.info(
             "Agent tools: %d available (integrations: %s)",
             len(self._tools),
@@ -191,6 +206,7 @@ class ProductivityAgent:
             skill_manager=self._skills,
             agent_queue=self._agent_queue,
             telegram=self.telegram,
+            mcp_integrations=self._mcp,
         )
         actions_taken: list[ActionTaken] = []
 
@@ -375,6 +391,7 @@ class ProductivityAgent:
             skill_manager=self._skills,
             agent_queue=self._agent_queue,
             telegram=self.telegram,
+            mcp_integrations=self._mcp,
         )
 
         full_response = ""

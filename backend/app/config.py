@@ -62,6 +62,14 @@ class Settings(BaseSettings):
     notion_goals_db: str = ""
     notion_key_results_db: str = ""
 
+    # --- MCP servers (optional integration) ---
+    # Notion's hosted MCP server. Enabling it lets the agent work with any
+    # Notion workspace through OAuth, with no database ids and no fixed
+    # property names — at the cost of Notion's own plan gating: their search
+    # tool requires a Notion AI plan.
+    mcp_notion_enabled: bool = False
+    mcp_notion_url: str = "https://mcp.notion.com/mcp"
+
     # --- Google Calendar (optional integration) ---
     # Enabled when an OAuth token is found, either in Secret Manager or at this
     # path. Without it the planner is disabled and no calendar tools are offered.
@@ -103,6 +111,10 @@ class Settings(BaseSettings):
         return bool(self.notion_token) and bool(
             self.notion_tasks_db or self.notion_notes_db or self.notion_goals_db
         )
+
+    @property
+    def mcp_notion_enabled_effective(self) -> bool:
+        return bool(self.mcp_notion_enabled and self.mcp_notion_url)
 
     @property
     def telegram_enabled(self) -> bool:

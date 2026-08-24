@@ -48,6 +48,7 @@ from app.services.proactive import ProactiveService
 from app.services.tagging import TaggingService
 from app.services.agent_queue import AgentTaskQueue
 from app.services.telegram import NullTelegramBot, TelegramBot
+from app.services.mcp_client import DocumentStoreTokenStorage, McpIntegration
 from app.storage import get_store
 
 # TODO: uncomment when voice input is enabled
@@ -68,6 +69,7 @@ _planner_agent: PlannerAgent | None = None
 _calendar_service: CalendarService | None = None
 _agent_queue: AgentTaskQueue | None = None
 _tick_handler: TickHandler | None = None
+_mcp_integrations: list[McpIntegration] = []
 
 # TODO: uncomment when voice input is enabled
 # _stt_service: STTService | None = None
@@ -202,6 +204,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         collection_prefix=settings.firestore_collection_prefix,
     )
 
+    # MCP servers — optional. Connecting is allowed to fail: an unreachable
+    # server disables its tools instead of stopping the agent.
+    global _mcp_integrations
+    _mcp_integrations = []
+    if settings.mcp_notion_enabled_effective:
+        notion_mcp = McpIntegration(
+            name="notion",
+            url=settings.mcp_notion_url,
+            token_storage=DocumentStoreTokenStorage(
+                firestore_client,
+                f"{settings.firestore_collection_prefix}_mcp_auth",
+                f"{settings.user_id}_notion",
+            ),
+        )
+        if await notion_mcp.connect():
+            _mcp_integrations.append(notion_mcp)
+
     # Agent
     _agent = ProductivityAgent(
         notion_service=_notion_service,
@@ -217,6 +236,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         calendar_service=_calendar_service,
         agent_queue=_agent_queue,
         model_id=settings.gemini_model,
+        mcp_integrations=_mcp_integrations,
     )
 
     # Telegram Bot — optional. Without it the agent is reachable over
@@ -319,6 +339,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await _telegram_bot.stop()
     if _notion_service:
         await _notion_service.close()
+    for _integration in _mcp_integrations:
+        await _integration.close()
     # TODO: uncomment when voice input is enabled
     # if _stt_service:
     #     await _stt_service.close()
@@ -574,6 +596,7 @@ def _log_startup_summary(settings: Settings) -> None:
         f"    calendar     {'on' if _calendar_service else 'off'}",
         f"    planner      {'on' if _planner_agent else 'off'}",
         f"    telegram     {'on' if settings.telegram_enabled else 'off — POST /api/v1/chat'}",
+        f"    mcp          {', '.join(i.name for i in _mcp_integrations) or 'none'}",
         f"    tools        {len(_agent._tools) if _agent else 0} available",
         "",
     ]
