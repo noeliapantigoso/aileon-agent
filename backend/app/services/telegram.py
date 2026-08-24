@@ -194,7 +194,7 @@ class TelegramBot:
             except Exception as exc:
                 logger.warning("Failed to save proactive message to memory: %s", exc)
 
-    # ── Guards ───────────────────────────────────────────────────────────────
+    # ── Guards ────────────────────────────────────────────────────────────────
 
     def _is_authorized(self, update: Update) -> bool:
         """Check that the message comes from the authorised user."""
@@ -288,14 +288,24 @@ class TelegramBot:
         try:
             response = await self._agent.process(message, source="telegram")
 
-            reply = response.message
+            reply = (response.message or "").strip()
 
-            # When tools ran, append a short summary
+            # Which tools ran goes to the activity log, not to the conversation.
+            # It used to be appended to the reply, which meant that whenever the
+            # model answered with no text the user received a message consisting
+            # of nothing but a list of tool names.
             if response.actions_taken:
-                actions_summary = ", ".join(
-                    a.tool for a in response.actions_taken
+                await self.send_log_message(
+                    f"💬 replied to you\n"
+                    f"tools: {', '.join(a.tool for a in response.actions_taken)}"
                 )
-                reply += f"\n\n📋 _{actions_summary}_"
+
+            if not reply:
+                logger.error("Agent produced no reply for: %s", message[:80])
+                reply = (
+                    "I did the work but couldn't put together an answer. "
+                    "Ask me again and I'll tell you how it went."
+                )
 
             # Telegram caps messages at 4096 chars
             chunks = _split_message(reply)
@@ -316,3 +326,43 @@ class TelegramBot:
             await update.message.reply_text(
                 "Something went wrong processing your message. Try again."
             )
+
+
+class NullTelegramBot:
+    """
+    Stand-in used when no bot token is configured.
+
+    Telegram is optional, but roughly a dozen call sites across the proactive
+    cycle, the tick and the insight service write to it. Rather than guard each
+    one, they get an object with the same shape that logs instead of sending.
+
+    Proactive messages are still written to memory, so the agent's own record of
+    "I said this and got no reply" stays accurate whether or not anyone is
+    listening on the other end.
+    """
+
+    def __init__(self, memory_manager: Any = None) -> None:
+        self._memory = memory_manager
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def process_update(self, update_data: dict) -> None:
+        logger.warning("Telegram update received but no bot is configured")
+
+    async def set_webhook(self, url: str, secret_token: str) -> None:
+        return None
+
+    async def send_log_message(self, text: str) -> None:
+        logger.info("[log] %s", text[:400])
+
+    async def send_proactive_message(self, text: str) -> None:
+        logger.info("[proactive, undelivered — no Telegram configured] %s", text[:400])
+        if self._memory is not None:
+            try:
+                await self._memory.save_proactive_message(text)
+            except Exception as exc:
+                logger.warning("Failed to save proactive message to memory: %s", exc)

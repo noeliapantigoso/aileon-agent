@@ -53,6 +53,61 @@ Rules:
 JSON:"""
 
 
+CALIBRATION_PROMPT = """You are reviewing an automatic calibration of a user's \
+productivity profile before it is written to their record.
+
+# Completion by hour (last 30 days)
+Only blocks the user explicitly confirmed or denied are counted. Hours with fewer
+than 3 confirmed blocks were skipped by the arithmetic pass — treat those as no data.
+
+{by_hour}
+
+# What the arithmetic pass concluded
+Peak candidates (>=70% completed): {peak_candidates}
+Low-energy candidates (<=30% completed): {low_candidates}
+Proposed peak_hours: {new_peak}
+Proposed low_energy_hours: {new_low}
+
+# Current stored values
+peak_hours: {cur_peak}
+low_energy_hours: {cur_low}
+
+# Who the user is
+{user_context}
+
+# Their active experiments and recurring commitments
+{experiments}
+
+# Your job
+
+The arithmetic tells you WHAT happened, never WHY. An hour with low completion can mean
+several different things, and only one of them is low energy:
+
+- They genuinely have less capacity then -> it IS low energy
+- Meetings or commitments keep landing on top of those blocks -> a scheduling conflict
+- They train, eat or rest at that hour -> the block should not have been there at all
+- They always put the hardest work there -> difficulty, not energy
+
+Marking a scheduling conflict as "low energy" is worse than doing nothing: the planner
+then refuses to put deep work there permanently, for a reason that was never true.
+
+Return ONLY valid JSON, no markdown:
+{{
+  "peak_hours": "H:MM-H:MM" or null to leave unchanged,
+  "low_energy_hours": "H:MM-H:MM" or null to leave unchanged,
+  "reasoning": "one or two sentences, in the user's language",
+  "confidence": "high" | "medium" | "low"
+}}
+
+Rules:
+- Thin sample -> return nulls for both. No data, no change.
+- confidence "low" -> the change will not be applied, so say so honestly.
+- Only change a value when you could state the reason out loud and have it sound right.
+- Keep the same "H:MM-H:MM" format, comma-separated when there are several ranges.
+
+JSON:"""
+
+
 class InsightService:
     """Weekly analysis: compute, store insights, report."""
 
@@ -122,7 +177,7 @@ class InsightService:
     async def _tune_productivity_profile(self) -> dict[str, Any]:
         """Tune peak_hours / low_energy_hours from real completion rates."""
         if self.calendar is None or self.memory is None:
-            return {"applied": False, "reason": "calendar/memory no disponible"}
+            return {"applied": False, "reason": "calendar/memory unavailable"}
 
         try:
             history = self.calendar.get_completion_history(days=30)
@@ -132,7 +187,7 @@ class InsightService:
 
         by_hour = history.get("by_hour") or {}
         if not by_hour:
-            return {"applied": False, "reason": "sin datos by_hour"}
+            return {"applied": False, "reason": "no by_hour data"}
 
         peak_candidates = []
         low_candidates = []
@@ -152,7 +207,7 @@ class InsightService:
                 low_candidates.append((h, rate, total))
 
         if not peak_candidates and not low_candidates:
-            return {"applied": False, "reason": "sin patrones claros"}
+            return {"applied": False, "reason": "no clear patterns in verified data"}
 
         peak_candidates.sort()
         low_candidates.sort()
@@ -164,14 +219,45 @@ class InsightService:
         cur_peak = calibration.get("peak_hours", "")
         cur_low = calibration.get("low_energy_hours", "")
 
+        # The arithmetic above says WHAT happened. Before writing it down, the model
+        # reviews it with the context the numbers cannot see — the user's routines,
+        # their experiments, their commitments — and decides whether a low completion
+        # rate really means low energy or something else entirely.
+        review = await self._review_calibration(
+            by_hour=by_hour,
+            peak_candidates=peak_candidates,
+            low_candidates=low_candidates,
+            new_peak=new_peak,
+            new_low=new_low,
+            cur_peak=cur_peak,
+            cur_low=cur_low,
+        )
+
+        if review.get("confidence") == "low":
+            logger.info("Calibration review returned low confidence; nothing applied")
+            return {
+                "applied": False,
+                "reason": "review not confident",
+                "reasoning": review.get("reasoning", ""),
+                "arithmetic_proposed": {"peak_hours": new_peak, "low_energy_hours": new_low},
+            }
+
+        # The reviewed values win over the raw arithmetic. None means "leave it".
+        reviewed_peak = review.get("peak_hours") or None
+        reviewed_low = review.get("low_energy_hours") or None
+
         updates: dict[str, Any] = {}
-        if new_peak and new_peak != cur_peak:
-            updates["peak_hours"] = new_peak
-        if new_low and new_low != cur_low:
-            updates["low_energy_hours"] = new_low
+        if reviewed_peak and reviewed_peak != cur_peak:
+            updates["peak_hours"] = reviewed_peak
+        if reviewed_low and reviewed_low != cur_low:
+            updates["low_energy_hours"] = reviewed_low
 
         if not updates:
-            return {"applied": False, "reason": "valores iguales a perfil actual"}
+            return {
+                "applied": False,
+                "reason": "review left values unchanged",
+                "reasoning": review.get("reasoning", ""),
+            }
 
         await self.memory.update_calibration(updates)
 
@@ -183,20 +269,28 @@ class InsightService:
                     "changed_at": datetime.now(timezone.utc).isoformat(),
                     "before": {"peak_hours": cur_peak, "low_energy_hours": cur_low},
                     "after": updates,
-                    "source": "weekly_auto_tune",
+                    "source": "weekly_auto_tune_reviewed",
                     "sample_size_days": 30,
+                    "reasoning": review.get("reasoning", ""),
+                    "confidence": review.get("confidence", ""),
+                    "arithmetic_proposed": {
+                        "peak_hours": new_peak, "low_energy_hours": new_low,
+                    },
                 })
             except Exception as exc:
                 logger.warning("Failed history write: %s", exc)
 
-        # Telegram notification
+        # Telegram notification, including WHY — the reasoning is the part worth
+        # reading, and the part the user can push back on.
         if self.telegram is not None:
-            msg_parts = ["🔧 *Ajusté tu perfil de productividad*"]
+            msg_parts = ["🔧 *Adjusted your productivity profile*"]
             if "peak_hours" in updates:
-                msg_parts.append(f"• Peak hours: `{cur_peak or 'sin valor'}` → `{updates['peak_hours']}`")
+                msg_parts.append(f"• Peak hours: `{cur_peak or 'unset'}` → `{updates['peak_hours']}`")
             if "low_energy_hours" in updates:
-                msg_parts.append(f"• Low energy: `{cur_low or 'sin valor'}` → `{updates['low_energy_hours']}`")
-            msg_parts.append("_Basado en tu cumplimiento real de los últimos 30 días. Avísame si no concuerda._")
+                msg_parts.append(f"• Low energy: `{cur_low or 'unset'}` → `{updates['low_energy_hours']}`")
+            if review.get("reasoning"):
+                msg_parts.append(f"\n{review['reasoning']}")
+            msg_parts.append("_Based on blocks you actually confirmed. Tell me if it does not match._")
             try:
                 await self.telegram.send_proactive_message("\n".join(msg_parts))
             except Exception as exc:
@@ -207,10 +301,87 @@ class InsightService:
 
     # ── Focus block tuning ──────────────────────────────────────────────────
 
+    async def _review_calibration(
+        self,
+        by_hour: dict,
+        peak_candidates: list,
+        low_candidates: list,
+        new_peak: str | None,
+        new_low: str | None,
+        cur_peak: str,
+        cur_low: str,
+    ) -> dict[str, Any]:
+        """
+        Have the model review what the arithmetic concluded.
+
+        Counting completion per hour is arithmetic and belongs in code. Deciding
+        whether a low rate means low energy — rather than a scheduling clash, a
+        training slot, or simply where the hardest work always lands — needs the
+        context the numbers do not carry. So the numbers propose and the model
+        rules on them.
+
+        Returns the raw review dict; a failure returns low confidence, which the
+        caller treats as "change nothing".
+        """
+        if self.genai is None:
+            return {"confidence": "low", "reasoning": "no model available to review"}
+
+        rows = []
+        for hour in sorted(by_hour, key=lambda h: int(h)):
+            slot = by_hour[hour]
+            total = slot.get("total", 0)
+            done = slot.get("completed", 0)
+            unverified = slot.get("unverified", 0)
+            rate = f"{done / total * 100:.0f}%" if total else "no data"
+            rows.append(
+                f"  {int(hour):02d}:00 — {rate} ({done}/{total} confirmed, "
+                f"{unverified} never verified)"
+            )
+
+        experiments = "(none)"
+        if self.experiments is not None:
+            try:
+                active = self.experiments.list_active()
+                experiments = "\n".join(
+                    f"- {e.get('name')}: {e.get('hypothesis', '')}" for e in active
+                ) or "(none)"
+            except Exception:
+                pass
+
+        prompt = CALIBRATION_PROMPT.format(
+            by_hour="\n".join(rows) or "  (no hours with confirmed blocks)",
+            peak_candidates=peak_candidates or "none",
+            low_candidates=low_candidates or "none",
+            new_peak=new_peak or "no change proposed",
+            new_low=new_low or "no change proposed",
+            cur_peak=cur_peak or "unset",
+            cur_low=cur_low or "unset",
+            user_context=self._user_context() or "(no profile available)",
+            experiments=experiments,
+        )
+
+        try:
+            response = self.genai.models.generate_content(
+                model=self._model_id,
+                contents=prompt,
+            )
+            parsed = _parse_json_loose(response.text or "")
+            if not isinstance(parsed, dict):
+                return {"confidence": "low", "reasoning": "unparseable review"}
+            logger.info(
+                "Calibration review: confidence=%s peak=%s low=%s",
+                parsed.get("confidence"), parsed.get("peak_hours"),
+                parsed.get("low_energy_hours"),
+            )
+            return parsed
+        except Exception as exc:
+            logger.error("Calibration review failed: %s", exc)
+            return {"confidence": "low", "reasoning": f"review failed: {exc}"}
+
     async def _tune_focus_block_minutes(self) -> dict[str, Any]:
         """Tune preferred_focus_block_minutes from the best-performing block length."""
         if self.calendar is None or self.memory is None:
-            return {"applied": False, "reason": "calendar/memory no disponible"}
+            return {"applied": False, "reason": "calendar/memory unavailable"}
 
         events = self._fetch_plan_events(days=30)
         if not events:
@@ -243,7 +414,7 @@ class InsightService:
                 best = (int(k), rate, v["t"])
 
         if best is None:
-            return {"applied": False, "reason": "sin muestra suficiente por bucket"}
+            return {"applied": False, "reason": "not enough samples per bucket"}
 
         new_value = best[0]
         calibration = self.memory.get_calibration()
@@ -251,13 +422,13 @@ class InsightService:
 
         # Solo cambiar si diferencia >= 15 min
         if cur is not None and abs(new_value - cur) < 15:
-            return {"applied": False, "reason": "valor cercano al actual"}
+            return {"applied": False, "reason": "value close to current"}
 
         await self.memory.update_calibration({"preferred_focus_block_minutes": new_value})
         await self._notify(
             f"🔧 *Adjusted your ideal block length*\n"
-            f"• `{cur or 'sin valor'}min` → `{new_value}min`\n"
-            f"_Bloques de {new_value}min cumplen {best[1]*100:.0f}% (n={best[2]})._"
+            f"• `{cur or 'unset'}min` → `{new_value}min`\n"
+            f"_Blocks of {new_value}min get completed {best[1]*100:.0f}% of the time (n={best[2]})._"
         )
         return {"applied": True, "value": new_value, "rate": best[1], "samples": best[2]}
 
@@ -266,7 +437,7 @@ class InsightService:
     async def _tune_work_hours(self) -> dict[str, Any]:
         """Tune work_start / work_end from the hours with real activity."""
         if self.calendar is None or self.memory is None:
-            return {"applied": False, "reason": "calendar/memory no disponible"}
+            return {"applied": False, "reason": "calendar/memory unavailable"}
 
         events = self._fetch_plan_events(days=30)
         if not events:
@@ -305,15 +476,15 @@ class InsightService:
             updates["work_end"] = new_end
 
         if not updates:
-            return {"applied": False, "reason": "valores cercanos al perfil"}
+            return {"applied": False, "reason": "values close to current"}
 
         await self.memory.update_calibration(updates)
         parts = ["🔧 *Adjusted your working hours*"]
         if "work_start" in updates:
-            parts.append(f"• Inicio: `{cur_start or 'sin valor'}` → `{updates['work_start']}`")
+            parts.append(f"• Start: `{cur_start or 'unset'}` → `{updates['work_start']}`")
         if "work_end" in updates:
-            parts.append(f"• Fin: `{cur_end or 'sin valor'}` → `{updates['work_end']}`")
-        parts.append(f"_Basado en {len(starts)} bloques cumplidos últimos 30 días._")
+            parts.append(f"• End: `{cur_end or 'unset'}` → `{updates['work_end']}`")
+        parts.append(f"_Based on {len(starts)} confirmed blocks over the last 30 days._")
         await self._notify("\n".join(parts))
         return {"applied": True, "updates": updates, "samples": len(starts)}
 
@@ -381,7 +552,7 @@ class InsightService:
     async def _auto_close_stale_experiments(self) -> dict[str, Any]:
         """Close experiments that are past their end date or clearly abandoned."""
         if self.experiments is None:
-            return {"applied": False, "reason": "experiments no disponible"}
+            return {"applied": False, "reason": "experiments unavailable"}
 
         try:
             active = self.experiments.list_active()
@@ -436,7 +607,7 @@ class InsightService:
                 self.experiments.close_experiment(exp_id, outcome=outcome, status=status)
                 closed.append({"id": exp_id, "name": name, "status": status, "rate": rate})
                 await self._notify(
-                    f"{emoji} *Cerré experimento '{name}'*\n"
+                    f"{emoji} *Closed experiment '{name}'*\n"
                     f"Estado: `{status}`\n"
                     f"{outcome}"
                 )
@@ -510,7 +681,7 @@ class InsightService:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)).isoformat()
 
         try:
-            from google.cloud.firestore import Query
+            from app.storage import Query
             docs = (
                 self.db.collection(f"{self._prefix}_history")
                 .where("user_id", "==", self._user_id)
@@ -653,7 +824,7 @@ class InsightService:
         if self.db is None:
             return []
         try:
-            from google.cloud.firestore import Query
+            from app.storage import Query
             docs = (
                 self.db.collection(f"{self._prefix}_insights")
                 .where("user_id", "==", self._user_id)

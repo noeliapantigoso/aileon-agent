@@ -19,7 +19,7 @@ from google.genai import types
 from app.agent.prompt_builder import build_system_prompt
 from app.agent.skill_manager import SkillManager, format_skills_for_prompt
 from app.agent.tool_executor import ToolExecutor
-from app.agent.tools import TOOLS
+from app.agent.tools import get_tools
 from app.models.schemas import ActionTaken, AgentResponse
 from app.services.memory import MemoryManager
 from app.services.notion import NotionService
@@ -75,7 +75,7 @@ class ProductivityAgent:
 
     def __init__(
         self,
-        notion_service: NotionService,
+        notion_service: NotionService | None,
         memory_manager: MemoryManager,
         user_timezone: str = "America/Lima",
         gemini_api_key: str = "",
@@ -102,6 +102,22 @@ class ProductivityAgent:
         self._planner = planner
         self._calendar = calendar_service
         self._agent_queue = agent_queue
+        # The tool list follows from the services that were actually handed in.
+        # An integration that was not configured contributes no tools, so the
+        # model is never shown a capability this deployment does not have.
+        self._integrations: set[str] = set()
+        if notion_service is not None:
+            self._integrations.add("notion")
+        if calendar_service is not None:
+            self._integrations.add("calendar")
+        if planner is not None:
+            self._integrations.add("planner")
+        self._tools = get_tools(self._integrations)
+        logger.info(
+            "Agent tools: %d available (integrations: %s)",
+            len(self._tools),
+            ", ".join(sorted(self._integrations)) or "none",
+        )
         # Assigned by main.py after the bot is built (circular dependency:
         # TelegramBot takes the agent in its constructor).
         self.telegram: Any = None
@@ -149,6 +165,7 @@ class ProductivityAgent:
             active_insights=context.get("active_insights", []),
             active_skills=format_skills_for_prompt(relevant_skills),
             active_experiments=active_experiments,
+            integrations=self._integrations,
         )
 
         # 3. Prepare the conversation history
@@ -160,7 +177,7 @@ class ProductivityAgent:
 
         # 4. Prepare the tool declarations
         gemini_tools = [
-            types.Tool(function_declarations=TOOLS + list(extra_tools or []))
+            types.Tool(function_declarations=self._tools + list(extra_tools or []))
         ]
 
         # 5. Function-calling loop
@@ -264,6 +281,41 @@ class ProductivityAgent:
                 "Do you want me to keep going?"
             )
 
+        # The model sometimes runs its tools and then returns no text at all.
+        # The caller ends up with an empty reply — in Telegram that showed up as a
+        # message containing only the tool-name footer and nothing else. It has
+        # every tool result in context here, so one more call with no tools
+        # available forces it to answer in words.
+        if not (final_text or "").strip() and actions_taken:
+            logger.warning(
+                "Empty final text after %d action(s); asking for a written answer",
+                len(actions_taken),
+            )
+            contents.append(types.Content(
+                role="user",
+                parts=[types.Part.from_text(
+                    text="You ran your tools but did not answer. Reply to the user "
+                         "now, in their language, saying what you did and what it "
+                         "means for them. Do not call any more tools."
+                )],
+            ))
+            try:
+                retry = await generate_with_retry(
+                    self._client,
+                    model=self._model_id,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        temperature=0.7,
+                        max_output_tokens=1024,
+                    ),
+                )
+                cands = retry.candidates or []
+                parts = (cands[0].content.parts if cands and cands[0].content else None) or []
+                final_text = _extract_text(parts) or final_text
+            except Exception as exc:
+                logger.error("Retry for a written answer failed: %s", exc)
+
         # 6. Save the interaction to memory (async, non-blocking)
         if save_history:
             actions_serialized = [
@@ -304,6 +356,7 @@ class ProductivityAgent:
             active_insights=context.get("active_insights", []),
             active_skills=format_skills_for_prompt(relevant_skills),
             active_experiments=active_experiments,
+            integrations=self._integrations,
         )
 
         contents = _build_contents(
@@ -311,7 +364,7 @@ class ProductivityAgent:
             user_message,
             timezone_str=self._timezone,
         )
-        gemini_tools = [types.Tool(function_declarations=TOOLS)]
+        gemini_tools = [types.Tool(function_declarations=self._tools)]
         tool_executor = ToolExecutor(
             notion=self._notion,
             memory=self._memory,

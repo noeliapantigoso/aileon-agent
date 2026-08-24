@@ -165,31 +165,31 @@ class ProactiveService:
             (a for a in response.actions_taken if a.tool == "send_message_to_user"),
             None,
         )
+        silence = next(
+            (a for a in response.actions_taken if a.tool == "stay_silent"),
+            None,
+        )
         other_actions = [
-            a.tool for a in response.actions_taken if a.tool != "send_message_to_user"
+            a.tool for a in response.actions_taken
+            if a.tool not in ("send_message_to_user", "stay_silent")
         ]
 
-        if decision is None:
-            why = (response.message or "").strip()
-            logger.info(
-                "Proactive stayed silent at hour %d. Reasoning: %s",
-                current_hour_local,
-                why[:200],
-            )
+        # ── Case 2: it declared silence deliberately ────────────────────────
+        if decision is None and silence is not None:
+            why = (silence.args or {}).get("reason", "").strip()
+            logger.info("Proactive stayed silent at hour %d: %s", current_hour_local, why[:200])
             self._log_wakeup(current_hour_local, sent=False, reason=why)
 
-            # Going silent after touching the user's world is almost always a
-            # model error: it wrote the message into the final text, which
-            # reaches nobody.
+            # Going quiet right after changing something in the user's world is
+            # still worth flagging, even when the silence was deliberate.
             writes = [a for a in other_actions if a in _WRITE_TOOLS]
             warning = (
-                f"\n\n⚠️ HEADS UP: it ran {', '.join(writes)} and did NOT tell you. "
-                f"The text above was meant for you and was lost."
+                f"\n\n⚠️ HEADS UP: it ran {', '.join(writes)} and chose not to tell you."
                 if writes else ""
             )
             await self._log(
                 f"🤐 {current_hour_local}:00 — stayed silent\n"
-                f"{why[:400] or '(no explanation)'}"
+                f"{why[:400] or '(no reason given)'}"
                 + (f"\n\nlooked at: {', '.join(other_actions)}" if other_actions else "")
                 + warning
             )
@@ -199,6 +199,46 @@ class ProactiveService:
                 "actions": other_actions,
             }
 
+        # ── Case 3: it called neither tool ──────────────────────────────────
+        # A protocol violation. Every wake-up must end by calling exactly one of
+        # send_message_to_user or stay_silent. Ending with prose instead almost
+        # always means the model wrote a message for the user into its final
+        # answer — which reaches nobody. It happened three times in two days
+        # before `stay_silent` existed, and prompt wording alone did not stop it.
+        # Deliver the text rather than lose a real message, and flag it loudly.
+        if decision is None:
+            text = (response.message or "").strip()
+            if not text:
+                self._log_wakeup(current_hour_local, sent=False, reason="(no output)")
+                await self._log(f"🤐 {current_hour_local}:00 — no output at all")
+                return {"sent": False, "skipped": "empty_output", "actions": other_actions}
+
+            logger.warning(
+                "Proactive: no send/silence tool at hour %d — delivering the final "
+                "text rather than losing it",
+                current_hour_local,
+            )
+            await self.telegram.send_proactive_message(text)
+            self._log_wakeup(
+                current_hour_local, sent=True, msg_type=forced or "protocol_violation",
+                reason="[recovered] written as final text, no tool call",
+            )
+            await self._log(
+                f"📨 {current_hour_local}:00 — sent, RECOVERED\n"
+                f"It called neither send_message_to_user nor stay_silent, and wrote "
+                f"this as its final answer. Delivered so it wasn't lost — but the "
+                f"agent broke protocol."
+                + (f"\n\nactions: {', '.join(other_actions)}" if other_actions else "")
+            )
+            return {
+                "sent": True,
+                "type": forced or "protocol_violation",
+                "recovered": True,
+                "preview": text[:80],
+                "actions": other_actions,
+            }
+
+        # ── Case 1: it decided to write ─────────────────────────────────────
         message = (decision.args or {}).get("message", "").strip()
         msg_type = (decision.args or {}).get("message_type", "other")
         reason = (decision.args or {}).get("reason", "")
@@ -350,10 +390,15 @@ class ProactiveService:
         if forced == "priority_question":
             obligation = (
                 f"\n## This one is mandatory right now\n"
-                f"It is time to ask what their priority for tomorrow ({tomorrow}) is. "
-                f"Call send_message_to_user with message_type='priority_question' and a "
-                f"single short question. When they answer, store it with "
-                f"save_day_priority(date='{tomorrow}'). The 1am planner uses it.\n"
+                f"It is time to ask what their priority for tomorrow ({tomorrow}) is.\n\n"
+                f"**You MUST call `send_message_to_user` this turn.** Do not write the "
+                f"question in your final answer — that text goes to an internal log and "
+                f"they will never see it. The question only exists if it goes through "
+                f"the tool. This has gone wrong before: the model wrote a perfectly good "
+                f"question as its final text and the user never received it.\n\n"
+                f"Use message_type='priority_question' and a single short question. "
+                f"When they answer, store it with save_day_priority(date='{tomorrow}'). "
+                f"The 1am planner reads it.\n"
             )
 
         return f"""\
@@ -405,15 +450,19 @@ when they raise the subject.
 First investigate with your tools if you are missing information. Act if there is
 something you can resolve yourself. Only then decide whether to speak.
 
-**Your final text does NOT reach them. Nobody reads it.** It is stored as the reason
-for your silence in an internal log. The ONLY channel to them is the
-`send_message_to_user` tool. If you write something addressed to them in the final
-text — "I scheduled", "I couldn't", "do you want me to…?" — that message is lost and
-they never find out.
+**Finish this wake-up by calling exactly one of two tools. Never by writing prose.**
 
-So: if you have something to tell them, call the tool. If not, do not call it and
-finish with ONE line, written for yourself in the third person, explaining why you
-stayed quiet.
+- `send_message_to_user` — you decided to write to them
+- `stay_silent` — you decided not to, with your reason in one line
+
+**Your final text does NOT reach them. Nobody reads it.** If you write something
+addressed to them there — "I scheduled", "I couldn't", "do you want me to…?" — that
+message is lost. This has already happened several times: perfectly good messages
+written as a final answer that the user never received. The message only exists if it
+goes through `send_message_to_user`.
+
+Silence is a valid and frequent choice — but it has to be declared with `stay_silent`,
+not left as the absence of an action.
 
 **If you did or attempted anything that affects them, you must tell them.** You moved
 a block, rescheduled a task, tried to schedule something and hit conflicts: all of
@@ -484,7 +533,7 @@ write an affirmation — live in the `proactive` skill already loaded above. Fol
         if self.db is None:
             return 0
         try:
-            from google.cloud.firestore import Query
+            from app.storage import Query
             docs = (
                 self.db.collection(f"{self._prefix}_history")
                 .where("user_id", "==", self._user_id)

@@ -128,15 +128,19 @@ def build_system_prompt(
     active_insights: list[dict[str, Any]] | None = None,
     active_skills: str | None = None,
     active_experiments: list[dict[str, Any]] | None = None,
+    integrations: set[str] | None = None,
 ) -> str:
     """
     Assemble the full system prompt for a chat turn.
 
     Args:
-        user_profile: Profile from Firestore ({entries, calibration}).
+        user_profile: Profile from the document store ({entries, calibration}).
         today_context: Today's agenda, pending tasks, active goals.
         relevant_memories: Episodic memories retrieved from Mem0.
         current_datetime: Current date and time in the user's timezone.
+        integrations: Which optional integrations are configured. Sections that
+            depend on one are left out when it is absent, so the prompt never
+            describes a capability the model was not given. None means all.
 
     Returns:
         The complete system prompt.
@@ -307,15 +311,21 @@ Your replies are delivered through Telegram. Follow these formatting rules:
   That belongs to the internal history, not to the chat.
 - Short and direct. No large headings or formal sections unless the content
   really calls for it.
+""")
 
-## Critical rule — Calendar and planning
+    # Stated only when a planner exists. Ordering the model to always route
+    # planning through a tool this deployment does not have would be an
+    # instruction it cannot follow, and it would explain the gap by inventing one.
+    if integrations is None or "planner" in integrations:
+        sections.append("""## Critical rule — Calendar and planning
 
 NEVER reply with a schedule or plan as text. If the user asks to organise their day,
 plan blocks, add something to the calendar or run a review, ALWAYS call
 `delegate_to_planner`. A plan written as text but never executed through a tool does
 not exist in their real calendar. No exceptions.
+""")
 
-## Critical rule — Always say what you saved and where
+    sections.append("""## Critical rule — Always say what you saved and where
 
 Every time you write something persistent — `remember_fact`, `update_my_profile`,
 `forget_about_me`, `forget_memory`, `save_skill`, `delete_skill` — you must say so in

@@ -973,13 +973,83 @@ PROACTIVE_TOOLS = [
             "required": ["message", "message_type", "reason"],
         },
     },
+    {
+        "name": "stay_silent",
+        "description": (
+            "Declare that you are NOT writing to the user this wake-up.\n"
+            "Finish every wake-up by calling exactly one of `send_message_to_user` "
+            "or `stay_silent`. Never finish by writing plain text instead: anything "
+            "you write as a final answer goes to an internal log the user never reads, "
+            "so a message meant for them would be lost."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Why staying quiet is right, in one line, written for yourself "
+                        "in the third person. e.g. 'They are in a focus block until "
+                        "17:30 and nothing is urgent.'"
+                    ),
+                },
+            },
+            "required": ["reason"],
+        },
+    },
 ]
 
 
-def get_gemini_tool_declarations() -> list[dict]:
+# Which optional integration each tool needs. A tool that is absent from this
+# map works with no integration at all — memory, skills, experiments and the
+# agent's own queue only need the document store, which is always present.
+#
+# Tools whose integration is off are never offered to the model. Withholding
+# them is what makes an integration genuinely optional: the model cannot call
+# what it cannot see, so nothing has to fail gracefully at call time.
+TOOL_REQUIREMENTS: dict[str, str] = {
+    # Notion: tasks, goals and key results
+    "create_task": "notion",
+    "get_tasks": "notion",
+    "update_task": "notion",
+    "archive_task": "notion",
+    "create_goal": "notion",
+    "get_goals": "notion",
+    "update_goal": "notion",
+    "archive_goal": "notion",
+    "update_goal_progress": "notion",
+    "create_key_result": "notion",
+    "get_key_results": "notion",
+    "archive_key_result": "notion",
+    "update_key_result": "notion",
+    "complete_key_result": "notion",
+    # Google Calendar
+    "get_calendar_events": "calendar",
+    # The planner needs both a calendar to write to and goals to plan towards
+    "delegate_to_planner": "planner",
+}
+
+
+def get_tools(available: set[str] | None = None) -> list[dict]:
+    """
+    The tools to offer, given the integrations that are actually configured.
+
+    `available` holds integration names ("notion", "calendar", "planner").
+    Passing None keeps every tool, which is what a fully configured deployment
+    gets.
+    """
+    if available is None:
+        return list(TOOLS)
+    return [
+        tool for tool in TOOLS
+        if TOOL_REQUIREMENTS.get(tool["name"], None) in (None, *available)
+    ]
+
+
+def get_gemini_tool_declarations(available: set[str] | None = None) -> list[dict]:
     """Convert the tool definitions to the shape the google-genai SDK expects."""
     declarations = []
-    for tool in TOOLS:
+    for tool in get_tools(available):
         declarations.append({
             "name": tool["name"],
             "description": tool["description"],

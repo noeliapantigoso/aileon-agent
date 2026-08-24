@@ -47,7 +47,8 @@ from app.services.principles import PrincipleService
 from app.services.proactive import ProactiveService
 from app.services.tagging import TaggingService
 from app.services.agent_queue import AgentTaskQueue
-from app.services.telegram import TelegramBot
+from app.services.telegram import NullTelegramBot, TelegramBot
+from app.storage import get_store
 
 # TODO: uncomment when voice input is enabled
 # from app.services.stt import STTService
@@ -60,7 +61,7 @@ logger = logging.getLogger(__name__)
 _notion_service: NotionService | None = None
 _memory_manager: MemoryManager | None = None
 _agent: ProductivityAgent | None = None
-_telegram_bot: TelegramBot | None = None
+_telegram_bot: TelegramBot | NullTelegramBot | None = None
 _proactive_service: ProactiveService | None = None
 _insight_service: InsightService | None = None
 _planner_agent: PlannerAgent | None = None
@@ -83,20 +84,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     logger.info("Initializing services...")
 
-    # Notion
-    _notion_service = NotionService(
-        token=settings.notion_token,
-        db_ids={
-            "tasks": settings.notion_tasks_db,
-            "notes": settings.notion_notes_db,
-            "goals": settings.notion_goals_db,
+    # Anything genuinely required is checked once, here, with a message that
+    # says what to do about it. Everything else is an optional integration.
+    problems = settings.missing_requirements()
+    if problems:
+        for problem in problems:
+            logger.error("%s", problem)
+        raise RuntimeError("; ".join(problems))
 
-            "key_results": settings.notion_key_results_db,
-        },
-    )
+    # Notion — optional. Without it the agent keeps memory, skills, experiments
+    # and the proactive cycle; it just has nowhere to file tasks and goals.
+    if settings.notion_enabled:
+        _notion_service = NotionService(
+            token=settings.notion_token,
+            db_ids={
+                "tasks": settings.notion_tasks_db,
+                "notes": settings.notion_notes_db,
+                "goals": settings.notion_goals_db,
+                "key_results": settings.notion_key_results_db,
+            },
+        )
+        logger.info("Notion integration enabled")
+    else:
+        _notion_service = None
+        logger.info("Notion integration disabled (no token or database ids)")
 
-    # Firestore
-    firestore_client = _init_firestore(settings)
+    # Document store: sqlite by default, Firestore when configured
+    firestore_client = get_store(settings)
 
     # Mem0
     mem0_client = _init_mem0(settings)
@@ -144,19 +158,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         insight_service=insight_service_local,
     )
 
-    # Calendar + Planner
+    # Calendar + Planner — optional. Enabled by the presence of an OAuth token,
+    # in Secret Manager or on disk.
     global _calendar_service, _planner_agent
     token_json = None
     if settings.gcp_project_id:
         token_json = load_calendar_token_from_secret(settings.gcp_project_id)
     if token_json is None:
-        token_json = load_calendar_token_local("token.json")
+        token_json = load_calendar_token_local(settings.calendar_token_path)
 
     if token_json:
         _calendar_service = CalendarService(
             token_json=token_json,
             user_timezone=settings.user_timezone,
         )
+        logger.info("Google Calendar integration enabled")
+    else:
+        logger.info(
+            "Google Calendar integration disabled (no OAuth token at %s)",
+            settings.calendar_token_path,
+        )
+
+    # The planner turns goals into calendar blocks, so it needs both sides.
+    if _calendar_service is not None and _notion_service is not None:
         _planner_agent = PlannerAgent(
             calendar_service=_calendar_service,
             notion_service=_notion_service,
@@ -169,7 +193,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         logger.info("Planner agent initialized (model=%s)", settings.gemini_model)
     else:
-        logger.warning("Calendar token unavailable — planner disabled")
+        logger.info("Planner disabled (needs both Calendar and Notion)")
 
     # One-time reminder queue
     global _agent_queue
@@ -183,6 +207,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         notion_service=_notion_service,
         memory_manager=_memory_manager,
         user_timezone=settings.user_timezone,
+        # Both are passed: the agent picks Vertex when a project is set and
+        # falls back to AI Studio otherwise. Without the key, a deployment with
+        # no GCP project could not build a client at all.
+        gemini_api_key=settings.gemini_api_key,
         gcp_project_id=settings.gcp_project_id,
         experiment_service=experiment_service,
         planner=_planner_agent,
@@ -191,19 +219,30 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         model_id=settings.gemini_model,
     )
 
-    # Telegram Bot
-    _telegram_bot = TelegramBot(
-        token=settings.telegram_bot_token,
-        allowed_user_id=settings.telegram_allowed_user_id,
-        agent=_agent,
-        memory_manager=_memory_manager,
-        log_bot_token=settings.telegram_log_bot_token,
-        log_chat_id=settings.telegram_log_chat_id,
-    )
-    # The agent needs the bot to write to the activity log (e.g. profile changes).
-    # Assigned here because TelegramBot takes the agent in its constructor.
-    _agent.telegram = _telegram_bot
-    await _telegram_bot.start()
+    # Telegram Bot — optional. Without it the agent is reachable over
+    # POST /api/v1/chat, which is enough to try it out before setting up a bot.
+    if settings.telegram_enabled:
+        _telegram_bot = TelegramBot(
+            token=settings.telegram_bot_token,
+            allowed_user_id=settings.telegram_allowed_user_id,
+            agent=_agent,
+            memory_manager=_memory_manager,
+            log_bot_token=settings.telegram_log_bot_token,
+            log_chat_id=settings.telegram_log_chat_id,
+        )
+        # The agent needs the bot to write to the activity log (e.g. profile
+        # changes). Assigned here because TelegramBot takes the agent in its
+        # constructor.
+        _agent.telegram = _telegram_bot
+        await _telegram_bot.start()
+        logger.info("Telegram integration enabled")
+    else:
+        _telegram_bot = NullTelegramBot(memory_manager=_memory_manager)
+        _agent.telegram = _telegram_bot
+        logger.info(
+            "Telegram integration disabled (no bot token) — "
+            "the agent answers over POST /api/v1/chat"
+        )
 
     # Skill manager, shared by ProactiveService and TickHandler
     from app.agent.skill_manager import SkillManager
@@ -253,7 +292,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
 
     # Register the webhook when a public URL is configured
-    if settings.telegram_webhook_url and settings.telegram_webhook_secret:
+    if (
+        settings.telegram_enabled
+        and settings.telegram_webhook_url
+        and settings.telegram_webhook_secret
+    ):
         webhook_url = f"{settings.telegram_webhook_url.rstrip('/')}/api/v1/telegram/webhook"
         await _telegram_bot.set_webhook(
             url=webhook_url,
@@ -267,7 +310,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     #     project_id=settings.gcp_project_id,
     # )
 
-    logger.info("All services initialized successfully")
+    _log_startup_summary(settings)
     yield
 
     # Cleanup
@@ -516,17 +559,25 @@ async def get_context() -> ContextResponse:
 # ── Initialisation helpers ───────────────────────────────────────────────────
 
 
-def _init_firestore(settings: Settings):
-    """Initialise the Firestore client. Returns None when unavailable."""
-    if not settings.gcp_project_id:
-        logger.warning("GCP project not configured, Firestore disabled")
-        return None
-    try:
-        from google.cloud import firestore
-        return firestore.Client(project=settings.gcp_project_id)
-    except Exception as exc:
-        logger.warning("Firestore not available: %s", exc)
-        return None
+def _log_startup_summary(settings: Settings) -> None:
+    """Print what is on and what is off, so a fresh install is self-explaining."""
+    backend = (settings.storage_backend or "auto").lower()
+    if backend == "auto":
+        backend = "firestore" if settings.gcp_project_id else "sqlite"
+
+    lines = [
+        "",
+        "  aileon is up",
+        f"    storage      {backend}",
+        f"    model        {settings.gemini_model}",
+        f"    notion       {'on' if settings.notion_enabled else 'off'}",
+        f"    calendar     {'on' if _calendar_service else 'off'}",
+        f"    planner      {'on' if _planner_agent else 'off'}",
+        f"    telegram     {'on' if settings.telegram_enabled else 'off — POST /api/v1/chat'}",
+        f"    tools        {len(_agent._tools) if _agent else 0} available",
+        "",
+    ]
+    logger.info("\n".join(lines))
 
 
 def _build_genai_client(settings: Settings):

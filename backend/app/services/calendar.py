@@ -251,17 +251,28 @@ class CalendarService:
         partial = sum(1 for e in plan_events if e.get("completed") == "partial")
         pending = total - completed - failed - partial
 
+        # Only blocks the user actually ruled on count towards the rate. An
+        # unverified block is missing information, not a failure — counting it in
+        # the denominator made every hour look near-zero and drove the weekly
+        # tuner to mark almost the whole day as low energy.
         by_hour: dict[int, dict[str, int]] = {}
         for e in plan_events:
             es = _parse_dt(e.get("start"))
             if not es:
                 continue
-            h = es.hour
-            slot = by_hour.setdefault(h, {"total": 0, "completed": 0})
+            state = e.get("completed")
+            slot = by_hour.setdefault(
+                e_hour := es.hour, {"total": 0, "completed": 0, "unverified": 0}
+            )
+            del e_hour
+            if state not in ("true", "false", "partial"):
+                slot["unverified"] += 1
+                continue
             slot["total"] += 1
-            if e.get("completed") == "true":
+            if state == "true":
                 slot["completed"] += 1
 
+        verified_total = completed + failed + partial
         return {
             "days": days,
             "total_plan_events": total,
@@ -269,7 +280,10 @@ class CalendarService:
             "failed": failed,
             "partial": partial,
             "pending": pending,
-            "completion_rate": (completed / total) if total > 0 else None,
+            # Rate over verified blocks only. None when nothing was verified —
+            # which means "no data", never "nothing got done".
+            "completion_rate": (completed / verified_total) if verified_total > 0 else None,
+            "verified_total": verified_total,
             "by_hour": by_hour,
         }
 

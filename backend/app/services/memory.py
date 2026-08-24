@@ -119,7 +119,7 @@ class MemoryManager:
         if self.db is None:
             return
         try:
-            from google.cloud.firestore import Query
+            from app.storage import Query
             collection = self.db.collection(f"{self._prefix}_history")
             docs = (
                 collection

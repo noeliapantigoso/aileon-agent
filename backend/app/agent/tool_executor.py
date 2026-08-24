@@ -87,6 +87,18 @@ class ToolExecutor:
         logger.info("Proactive decision: type=%s reason=%s", message_type, reason)
         return {"status": "queued", "message_type": message_type, "reason": reason}
 
+    async def _stay_silent(self, reason: str) -> dict[str, Any]:
+        """
+        Record a deliberate decision not to write to the user.
+
+        Exists to make silence an explicit action. Without it, "decided not to
+        write" and "wrote the message into the final text by mistake" both look
+        like the absence of a tool call, and the second one silently loses a
+        real message.
+        """
+        logger.info("Proactive decision: stay silent — %s", reason)
+        return {"status": "silent", "reason": reason}
+
     async def _save_day_priority(self, date: str, priority: str) -> dict[str, Any]:
         self.memory.save_day_priority(date, priority)
         return {"status": "saved", "date": date}
@@ -461,6 +473,15 @@ class ToolExecutor:
             return {"error": "SkillManager not available"}
         try:
             slug = self._skills.save(name, content, reason)
+            # A skill rewrites how the agent behaves from the next turn on, and a
+            # custom skill overrides the built-in file of the same name for good.
+            # That is too consequential to depend on the model remembering to
+            # mention it, so it is recorded here as well.
+            await self._log_to_bitacora(
+                f"📝 skill saved: `{slug}`\n"
+                f"reason: {reason}\n"
+                f"{len(content)} chars — it now overrides the repo file of the same name"
+            )
             return {"status": "saved", "name": slug, "reason": reason}
         except Exception as exc:
             logger.error("Failed to save skill '%s': %s", name, exc)
@@ -472,6 +493,7 @@ class ToolExecutor:
         try:
             deleted = self._skills.delete(name)
             if deleted:
+                await self._log_to_bitacora(f"🗑️ skill deleted: `{name}`")
                 return {"status": "deleted", "name": name}
             return {"status": "not_found", "name": name}
         except Exception as exc:
@@ -522,6 +544,7 @@ class ToolExecutor:
         "get_goals": _get_goals,
         "save_day_priority": _save_day_priority,
         "send_message_to_user": _send_message_to_user,
+        "stay_silent": _stay_silent,
         "update_goal_progress": _update_goal_progress,
         "update_goal": _update_goal,
         "archive_goal": _archive_goal,
