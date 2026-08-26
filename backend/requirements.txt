@@ -1,37 +1,60 @@
+# Pinned deliberately, to the versions this was tested against.
+#
+# Sixteen packages with open lower bounds made pip's resolver exceed its
+# maximum depth ("resolution-too-deep"). A Raspberry Pi backtracking over that
+# graph is far worse than a laptop doing it, and a pinned file also makes a
+# clone build the same thing that was verified here.
+#
+# Every version below publishes a linux/aarch64 wheel for Python 3.11, so
+# nothing is compiled from source on ARM.
+#
+# Pinned to tested rather than latest on purpose: google-genai 2.x and mcp 2.x
+# both exist and both change APIs this code calls. Bump one at a time and run
+# the app before trusting it.
+
+# Pinned deliberately. Sixteen packages with open lower bounds made pip's
+# resolver exceed its maximum depth ("resolution-too-deep"), and a Raspberry Pi
+# backtracking over that graph is far worse than a laptop doing it. Pinning also
+# makes a clone build the same thing this was tested against.
+#
+# Every version below was verified to publish a linux/aarch64 wheel for Python
+# 3.11, so nothing is compiled from source on ARM.
+#
+# To update: bump a pin, rebuild, run the app.
 # Core
-fastapi>=0.100.0
-uvicorn[standard]>=0.23.0
-python-multipart>=0.0.6
-pydantic-settings>=2.0.0
+fastapi==0.136.1
+uvicorn[standard]==0.47.0
+python-multipart==0.0.29
+pydantic-settings==2.14.1
 
 # Google Cloud
-google-cloud-firestore>=2.16.0
-google-cloud-storage>=2.14.0
-google-cloud-secret-manager>=2.20.0
+google-cloud-firestore==2.27.0
+google-cloud-storage==3.10.1
+google-cloud-secret-manager==2.28.0
 
 # Google Calendar
-google-api-python-client>=2.100.0
-google-auth-httplib2>=0.2.0
-google-auth-oauthlib>=1.2.0
+google-api-python-client==2.196.0
+google-auth-httplib2==0.4.0
+google-auth-oauthlib==1.4.0
 
 # LLM
-google-genai>=1.0.0
+google-genai==1.75.0
 
 # Notion
 notion-client==2.2.0
 
 # Memory
-mem0ai>=0.1.0
+mem0ai==2.0.18
 
 # Telegram
-python-telegram-bot>=21.0
+python-telegram-bot==22.8
 
 # HTTP client (usado por varios servicios)
-httpx>=0.25.0
+httpx==0.28.1
 
 # TODO: Descomentar cuando se active ESP32 + voice + PWA auth
 # firebase-admin>=6.0.0
 # python-jose[cryptography]>=3.3.0
 
 # MCP client (optional integrations such as Notion)
-mcp>=1.9.0
+mcp==1.27.1
