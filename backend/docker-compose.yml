@@ -19,11 +19,15 @@ services:
     environment:
       STORAGE_BACKEND: sqlite
       SQLITE_PATH: /data/aileon.db
+      CALENDAR_TOKEN_PATH: /secrets/token.json
     volumes:
       # Everything the agent knows lives in this one file. Back it up.
       - ./data:/data
-      # Google Calendar's OAuth token, if you use the planner.
-      - ./token.json:/app/token.json:ro
+      # Google Calendar's OAuth token, if you use the planner. Mounted as a
+      # directory on purpose: bind-mounting a single file that does not exist
+      # yet makes Docker silently create a directory in its place, and the
+      # calendar then fails with nothing to point at.
+      - ./secrets:/secrets:ro
     ports:
       - "8080:8080"
 

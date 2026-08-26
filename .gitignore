@@ -54,3 +54,7 @@ build/
 # Logs
 *.log
 logs/
+
+# Self-hosted secrets directory (mounted into the container)
+secrets/*
+!secrets/.gitkeep
