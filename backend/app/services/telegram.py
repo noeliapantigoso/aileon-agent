@@ -1,8 +1,12 @@
 """
 Telegram bot service for receiving and sending text messages.
 
-Runs in webhook mode. Only accepts messages from the authorised user id.
-A second, optional bot writes the internal activity log to a separate chat.
+Runs in webhook mode when a public URL is configured, and in polling mode
+otherwise — a home server or a Raspberry Pi has no public URL, so polling is
+what makes those deployments possible.
+
+Only accepts messages from the authorised user id. A second, optional bot
+writes the internal activity log to a separate chat.
 """
 
 from __future__ import annotations
@@ -64,6 +68,7 @@ class TelegramBot:
         memory_manager: Any = None,
         log_bot_token: str = "",
         log_chat_id: str = "",
+        use_polling: bool = False,
     ) -> None:
         self._token = token
         self._allowed_user_id = allowed_user_id
@@ -73,15 +78,17 @@ class TelegramBot:
         self._log_chat_id = log_chat_id or str(allowed_user_id)
         self._log_bot: Any = None
         self._app: Application | None = None
+        # Webhooks need a public URL. On a home server or a Raspberry Pi there
+        # is none, so the bot asks Telegram for updates instead of being called.
+        self._use_polling = use_polling
 
     async def start(self) -> None:
-        """Initialise the bot to receive updates over a webhook."""
-        self._app = (
-            Application.builder()
-            .token(self._token)
-            .updater(None)
-            .build()
-        )
+        """Initialise the bot in whichever mode this deployment can support."""
+        builder = Application.builder().token(self._token)
+        if not self._use_polling:
+            # No updater: updates arrive as HTTP requests on the webhook route.
+            builder = builder.updater(None)
+        self._app = builder.build()
 
         # Handlers
         self._app.add_handler(CommandHandler("start", self._handle_start))
@@ -95,11 +102,27 @@ class TelegramBot:
         await self._app.initialize()
         await self._app.start()
 
-        logger.info("Telegram bot started (webhook mode)")
+        if self._use_polling:
+            # Telegram refuses to serve getUpdates while a webhook is
+            # registered, and a stale one from an earlier deployment survives
+            # on their side. Clearing it is what makes the switch actually work.
+            try:
+                await self._app.bot.delete_webhook(drop_pending_updates=False)
+            except Exception as exc:
+                logger.warning("Could not clear the old webhook: %s", exc)
+            await self._app.updater.start_polling()
+            logger.info("Telegram bot started (polling mode)")
+        else:
+            logger.info("Telegram bot started (webhook mode)")
 
     async def stop(self) -> None:
         """Stop the bot."""
         if self._app:
+            if self._use_polling and self._app.updater is not None:
+                try:
+                    await self._app.updater.stop()
+                except Exception:
+                    pass
             await self._app.stop()
             await self._app.shutdown()
             logger.info("Telegram bot stopped")

@@ -249,6 +249,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             memory_manager=_memory_manager,
             log_bot_token=settings.telegram_log_bot_token,
             log_chat_id=settings.telegram_log_chat_id,
+            # Webhook when a public URL is configured, polling otherwise. A
+            # home server or a Pi has no public URL, so polling is what makes
+            # those deployments possible at all.
+            use_polling=not settings.telegram_webhook_url,
         )
         # The agent needs the bot to write to the activity log (e.g. profile
         # changes). Assigned here because TelegramBot takes the agent in its
@@ -581,6 +585,12 @@ async def get_context() -> ContextResponse:
 # ── Initialisation helpers ───────────────────────────────────────────────────
 
 
+def _telegram_mode(settings: Settings) -> str:
+    if not settings.telegram_enabled:
+        return "off — POST /api/v1/chat"
+    return "webhook" if settings.telegram_webhook_url else "polling"
+
+
 def _log_startup_summary(settings: Settings) -> None:
     """Print what is on and what is off, so a fresh install is self-explaining."""
     backend = (settings.storage_backend or "auto").lower()
@@ -595,7 +605,7 @@ def _log_startup_summary(settings: Settings) -> None:
         f"    notion       {'on' if settings.notion_enabled else 'off'}",
         f"    calendar     {'on' if _calendar_service else 'off'}",
         f"    planner      {'on' if _planner_agent else 'off'}",
-        f"    telegram     {'on' if settings.telegram_enabled else 'off — POST /api/v1/chat'}",
+        f"    telegram     {_telegram_mode(settings)}",
         f"    mcp          {', '.join(i.name for i in _mcp_integrations) or 'none'}",
         f"    tools        {len(_agent._tools) if _agent else 0} available",
         "",
