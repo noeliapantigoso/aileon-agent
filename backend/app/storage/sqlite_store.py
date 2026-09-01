@@ -325,11 +325,17 @@ class SqliteStore:
         os.makedirs(directory, exist_ok=True)
 
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn = sqlite3.connect(path, check_same_thread=False, timeout=5)
         self._conn.executescript(_SCHEMA)
-        # WAL keeps reads from blocking on a write, which matters once the
-        # hourly tick overlaps with an incoming message.
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        # Wait rather than fail when another writer holds the file.
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        # WAL keeps reads from blocking on a write, but it is not
+        # unconditionally safe: network filesystems cannot take its locks, and
+        # SQLite builds before 3.51.3 carry a WAL-reset corruption bug. The
+        # shared helper decides, and leaves a database that is already in WAL
+        # alone rather than downgrading it under other open connections.
+        from app.storage.schema import apply_journal_mode
+        self.journal_mode = apply_journal_mode(self._conn, os.path.basename(path))
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.commit()
 
