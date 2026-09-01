@@ -160,17 +160,24 @@ CREATE TABLE IF NOT EXISTS principles (
     personality_relevance TEXT    -- list of enneagram type keys
 );
 
--- One row per user, day and kind. The daily caps in the proactive cycle are
--- counted straight off this table.
+-- One row per logged event. The daily caps in the proactive cycle are counted
+-- straight off this table.
+--
+-- Keyed by id and not by (user, date, type): the agent sends several messages
+-- of the same kind on the same day — four daily_affirmation rows on one date
+-- in the real data — and a composite key silently collapsed 125 of them.
 CREATE TABLE IF NOT EXISTS proactive_log (
+    id        TEXT NOT NULL PRIMARY KEY,
     user_id   TEXT NOT NULL,
     date      TEXT NOT NULL,          -- YYYY-MM-DD, the user's local day
-    type      TEXT NOT NULL DEFAULT 'message',  -- message | wakeups
+    type      TEXT NOT NULL DEFAULT 'message',  -- the kind of message, or 'wakeups'
     sent_at   TEXT,
     wakeups   TEXT,   -- [{hour, decision, reason}]
-    messages  TEXT,
-    PRIMARY KEY (user_id, date, type)
+    messages  TEXT
 );
+-- "how many did I already send today", asked on every wake-up.
+CREATE INDEX IF NOT EXISTS idx_proactive_log_day
+    ON proactive_log (user_id, date);
 
 -- Every change the agent made to its own understanding of the user, so a bad
 -- one can be found and undone.
