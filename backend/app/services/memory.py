@@ -12,10 +12,25 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# The collection names the agent knows, mapped onto tables. Only `users`
+# differs: the profile became one row per entry, so what used to be a single
+# document is now a small table of its own.
+_TABLE_FOR_COLLECTION = {
+    "users": "profile_entries",
+}
+
+# Columns in `history` the tagger is allowed to fill. Anything else it returns
+# is ignored: a new tag needs a column before it can be stored.
+_HISTORY_TAG_COLUMNS = frozenset({
+    "sentiment", "energy_level", "hedging_score",
+    "is_action_commitment", "topics", "themes_mentioned",
+})
 
 SESSION_TIMEOUT_SECONDS = 30 * 60  # 30 min idle -> new session
 WORK_CONTEXT_TTL_SECONDS = 5 * 60  # Work-context cache lifetime
@@ -37,13 +52,17 @@ class MemoryManager:
         firestore_client: Any,
         mem0_client: Any,
         notion_service: Any,
+        database: Any = None,
         collection_prefix: str = "assistant",
         user_id: str = "user",
         principle_service: Any = None,
         tagging_service: Any = None,
         insight_service: Any = None,
     ) -> None:
+        # `db` is the document-store adapter, still handed to SkillManager.
+        # `sql` is the real database; everything in this class uses it.
         self.db = firestore_client
+        self.sql = database
         self.mem0 = mem0_client
         self.notion = notion_service
         self.principles = principle_service
@@ -115,36 +134,34 @@ class MemoryManager:
         }
 
     async def _restore_buffer_from_firestore(self) -> None:
-        """Load the latest interactions from Firestore into the in-memory buffer."""
-        if self.db is None:
+        """Load the most recent interactions into the in-memory buffer."""
+        if self.sql is None:
             return
         try:
-            from app.storage import Query
-            collection = self.db.collection(f"{self._prefix}_history")
-            docs = (
-                collection
-                .where("user_id", "==", self._user_id)
-                .order_by("timestamp", direction=Query.DESCENDING)
-                .limit(MAX_CONVERSATION_MESSAGES)
-                .stream()
+            interactions = self.sql.query(
+                "SELECT * FROM history WHERE user_id = ? "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (self._user_id, MAX_CONVERSATION_MESSAGES),
             )
-            interactions = [doc.to_dict() for doc in docs]
             interactions.reverse()  # oldest first
 
+            # A column that was never filled is NULL, not absent, so the second
+            # argument to .get() never fires and every optional field is read
+            # with `or` instead.
             for it in interactions:
-                ts = it.get("timestamp", "")
+                ts = it.get("timestamp") or ""
                 self.conversation_buffer.append(
-                    {"role": "user", "content": it.get("user_message", ""), "timestamp": ts}
+                    {"role": "user", "content": it.get("user_message") or "", "timestamp": ts}
                 )
                 self.conversation_buffer.append({
                     "role": "assistant",
-                    "content": it.get("agent_response", ""),
-                    "actions": it.get("actions", []),
+                    "content": it.get("agent_response") or "",
+                    "actions": it.get("actions") or [],
                     "timestamp": ts,
-                    "proactive": it.get("proactive", False),
+                    "proactive": bool(it.get("proactive")),
                 })
             if interactions:
-                logger.info("Restored %d interactions from Firestore", len(interactions))
+                logger.info("Restored %d interactions", len(interactions))
         except Exception as exc:
             logger.warning("Failed to restore conversation buffer: %s", exc)
 
@@ -180,25 +197,30 @@ class MemoryManager:
         )
 
     def save_day_priority(self, date_iso: str, priority: str) -> None:
-        """Store the user's priority for a specific date in Firestore."""
-        if self.db is None:
+        """Store the user's priority for a specific date."""
+        if self.sql is None:
             return
         try:
-            self.db.collection(f"{self._prefix}_daily_context").document(date_iso).set(
-                {"priority": priority, "saved_at": datetime.now(timezone.utc).isoformat()},
-                merge=True,
-            )
+            self.sql.upsert("daily_context", {
+                "user_id": self._user_id,
+                "date": date_iso,
+                "priority": priority,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+            }, keys=["user_id", "date"])
         except Exception as exc:
             logger.warning("Failed to save day priority: %s", exc)
 
     def get_day_priority(self, date_iso: str) -> str:
         """Read the stored priority for a date. Returns '' when there is none."""
-        if self.db is None:
+        if self.sql is None:
             return ""
         try:
-            doc = self.db.collection(f"{self._prefix}_daily_context").document(date_iso).get()
-            if doc.exists:
-                return doc.to_dict().get("priority", "")
+            row = self.sql.query_one(
+                "SELECT priority FROM daily_context WHERE user_id = ? AND date = ?",
+                (self._user_id, date_iso),
+            )
+            if row:
+                return row.get("priority") or ""
         except Exception as exc:
             logger.warning("Failed to get day priority: %s", exc)
         return ""
@@ -232,32 +254,55 @@ class MemoryManager:
         or "why did you decide to message me yesterday" without the user having to
         open the Google Cloud console.
         """
-        if self.db is None:
-            return {"error": "Firestore unavailable"}
+        if self.sql is None:
+            return {"error": "database unavailable"}
         if collection not in self.READABLE_COLLECTIONS:
             return {
                 "error": f"Unknown collection: {collection}",
                 "valid": list(self.READABLE_COLLECTIONS),
             }
 
-        name = f"{self._prefix}_{collection}"
+        if self.sql is None:
+            return {"error": "database unavailable", "collection": collection}
+
+        table = _TABLE_FOR_COLLECTION.get(collection, collection)
         limit = max(1, min(limit, 50))
+
+        # Rows carry a user column except for `principles`, which is shared
+        # knowledge rather than anything about a person.
+        scoped = table != "principles"
+        where = "WHERE user_id = ?" if scoped else ""
+        params: tuple = (self._user_id,) if scoped else ()
 
         try:
             if document_id:
-                doc = self.db.collection(name).document(document_id).get()
-                if not doc.exists:
-                    return {"collection": collection, "document_id": document_id, "found": False}
+                key = "date" if table == "daily_context" else "id"
+                rows = self.sql.query(
+                    f"SELECT * FROM {table} {where} "
+                    f"{'AND' if scoped else 'WHERE'} {key} = ? LIMIT 1",
+                    params + (document_id,),
+                )
+                if not rows:
+                    return {
+                        "collection": collection,
+                        "document_id": document_id,
+                        "found": False,
+                    }
                 return {
                     "collection": collection,
                     "document_id": document_id,
                     "found": True,
-                    "data": _truncate_doc(doc.to_dict() or {}),
+                    "data": _truncate_doc(rows[0]),
                 }
 
-            docs = self.db.collection(name).limit(limit).stream()
-            items = [{"id": d.id, **_truncate_doc(d.to_dict() or {})} for d in docs]
-            return {"collection": collection, "count": len(items), "documents": items}
+            rows = self.sql.query(
+                f"SELECT * FROM {table} {where} LIMIT ?", params + (limit,)
+            )
+            return {
+                "collection": collection,
+                "count": len(rows),
+                "documents": [_truncate_doc(r) for r in rows],
+            }
         except Exception as exc:
             logger.warning("read_storage failed for %s: %s", collection, exc)
             return {"error": str(exc), "collection": collection}
@@ -278,10 +323,10 @@ class MemoryManager:
         if len(self.conversation_buffer) > MAX_CONVERSATION_MESSAGES * 2:
             self.conversation_buffer = self.conversation_buffer[-(MAX_CONVERSATION_MESSAGES * 2):]
 
-        # Persist to Firestore
-        if self.db is not None:
+        if self.sql is not None:
             try:
-                self.db.collection(f"{self._prefix}_history").add({
+                self.sql.insert("history", {
+                    "id": uuid.uuid4().hex[:20],
                     "user_id": self._user_id,
                     "user_message": "",
                     "agent_response": message,
@@ -361,23 +406,39 @@ class MemoryManager:
 
     # ── Profile: prose entries (no schema) ───────────────────────────────────
 
-    def _profile_doc(self):
-        return self.db.collection(f"{self._prefix}_users").document(self._user_id)
-
     def get_profile_entries(self) -> list[str]:
         """Prose entries about the user. Always injected in full."""
-        if self.db is None:
+        if self.sql is None:
             return list(DEFAULT_PROFILE_ENTRIES)
         try:
-            doc = self._profile_doc().get()
-            if doc.exists:
-                data = doc.to_dict() or {}
-                entries = data.get("entries")
-                if isinstance(entries, list):
-                    return [str(e) for e in entries if e]
+            rows = self.sql.query(
+                "SELECT content FROM profile_entries WHERE user_id = ? "
+                "ORDER BY position",
+                (self._user_id,),
+            )
+            if rows:
+                return [r["content"] for r in rows if r.get("content")]
         except Exception as exc:
             logger.error("Failed to load profile entries: %s", exc)
         return list(DEFAULT_PROFILE_ENTRIES)
+
+    def _write_profile_entries(self, entries: list[str]) -> None:
+        """
+        Replace the stored entries with this list.
+
+        Done in one transaction: a half-written profile is worse than an
+        unchanged one, and this is the only place the whole set is rewritten.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self.sql.transaction() as conn:
+            conn.execute(
+                "DELETE FROM profile_entries WHERE user_id = ?", (self._user_id,)
+            )
+            conn.executemany(
+                "INSERT INTO profile_entries (user_id, position, content, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                [(self._user_id, i, e, now) for i, e in enumerate(entries)],
+            )
 
     def add_profile_entry(self, entry: str, replaces: str | None = None) -> dict[str, Any]:
         """
@@ -389,8 +450,8 @@ class MemoryManager:
         entry = (entry or "").strip()
         if not entry:
             return {"error": "empty entry"}
-        if self.db is None:
-            return {"error": "Firestore unavailable"}
+        if self.sql is None:
+            return {"error": "database unavailable"}
 
         entries = self.get_profile_entries()
         replaced = None
@@ -408,7 +469,7 @@ class MemoryManager:
             entries.append(entry)
 
         try:
-            self._profile_doc().set({"entries": entries}, merge=True)
+            self._write_profile_entries(entries)
         except Exception as exc:
             logger.error("Failed to save profile entry: %s", exc)
             return {"error": str(exc)}
@@ -423,8 +484,8 @@ class MemoryManager:
 
     def remove_profile_entry(self, entry: str) -> dict[str, Any]:
         """Remove a profile entry by partial match."""
-        if self.db is None:
-            return {"error": "Firestore unavailable"}
+        if self.sql is None:
+            return {"error": "database unavailable"}
         entries = self.get_profile_entries()
         needle = (entry or "").strip().lower()
         if not needle:
@@ -434,7 +495,7 @@ class MemoryManager:
         if len(kept) == len(entries):
             return {"status": "not_found", "entry": entry}
         try:
-            self._profile_doc().set({"entries": kept}, merge=True)
+            self._write_profile_entries(kept)
         except Exception as exc:
             logger.error("Failed to remove profile entry: %s", exc)
             return {"error": str(exc)}
@@ -442,8 +503,8 @@ class MemoryManager:
 
     # ── Calibration: what the machine measures (this one does have fields) ───
 
-    def _calibration_doc(self):
-        return self.db.collection(f"{self._prefix}_calibration").document(self._user_id)
+    # Calibration has real columns because every one of these is a number the
+    # weekly tuner reads and writes.
 
     def get_calibration(self) -> dict[str, Any]:
         """
@@ -452,22 +513,33 @@ class MemoryManager:
         They have structure because code reads them, recomputes them and writes
         them back. That is the only reason a field exists here at all.
         """
-        if self.db is None:
+        if self.sql is None:
             return dict(DEFAULT_CALIBRATION)
         try:
-            doc = self._calibration_doc().get()
-            if doc.exists:
-                return {**DEFAULT_CALIBRATION, **(doc.to_dict() or {})}
+            row = self.sql.query_one(
+                "SELECT * FROM calibration WHERE user_id = ?", (self._user_id,)
+            )
+            if row:
+                # A column the tuner has never written comes back as NULL, and
+                # the caller expects the default rather than a None it would
+                # have to handle at every use.
+                stored = {k: v for k, v in row.items()
+                          if v is not None and k not in ("user_id", "updated_at")}
+                return {**DEFAULT_CALIBRATION, **stored}
         except Exception as exc:
             logger.warning("Failed to load calibration: %s", exc)
         return dict(DEFAULT_CALIBRATION)
 
     async def update_calibration(self, updates: dict[str, Any]) -> None:
         """Write calibration fields. Only insights.py uses this."""
-        if self.db is None:
+        if self.sql is None or not updates:
             return
         try:
-            self._calibration_doc().set(updates, merge=True)
+            self.sql.upsert("calibration", {
+                "user_id": self._user_id,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                **updates,
+            }, keys=["user_id"])
             logger.info("Calibration updated: %s", list(updates.keys()))
         except Exception as exc:
             logger.error("Failed to update calibration: %s", exc)
@@ -555,11 +627,10 @@ class MemoryManager:
             except Exception as exc:
                 logger.warning("Tagging failed: %s", exc)
 
-        # Firestore: historial con tags
-        if self.db is not None:
+        if self.sql is not None:
             try:
-                collection = self.db.collection(f"{self._prefix}_history")
-                doc = {
+                row = {
+                    "id": uuid.uuid4().hex[:20],
                     "user_id": self._user_id,
                     "user_message": user_message,
                     "agent_response": agent_response,
@@ -567,10 +638,14 @@ class MemoryManager:
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "word_count": len(user_message.split()),
                 }
-                doc.update(tags)
-                collection.add(doc)
+                # The tagger returns only the columns it managed to fill, and
+                # anything it does not know about would be a column that does
+                # not exist, so unknown keys are dropped rather than crashing
+                # the write of a message that is otherwise fine.
+                row.update({k: v for k, v in tags.items() if k in _HISTORY_TAG_COLUMNS})
+                self.sql.insert("history", row)
             except Exception as exc:
-                logger.error("Failed to persist to Firestore: %s", exc)
+                logger.error("Failed to persist interaction: %s", exc)
 
         # Mem0: fact extraction
         if self.mem0 is not None:

@@ -63,8 +63,10 @@ class ProactiveService:
         user_id: str = "user",
         model_id: str = "gemini-2.5-pro",
         config: dict | None = None,
+        database: Any = None,
     ) -> None:
         self.db = firestore_client
+        self.sql = database
         self.experiments = experiment_service
         self.notion = notion_service
         self.telegram = telegram_bot
@@ -530,22 +532,18 @@ write an affirmation — live in the `proactive` skill already loaded above. Fol
 
     def _days_since_last_user_message(self) -> int:
         """Days since the user last wrote."""
-        if self.db is None:
+        if self.sql is None:
             return 0
         try:
-            from app.storage import Query
-            docs = (
-                self.db.collection(f"{self._prefix}_history")
-                .where("user_id", "==", self._user_id)
-                .order_by("timestamp", direction=Query.DESCENDING)
-                .limit(1)
-                .stream()
+            row = self.sql.query_one(
+                "SELECT timestamp FROM history WHERE user_id = ? "
+                "ORDER BY timestamp DESC LIMIT 1",
+                (self._user_id,),
             )
-            for doc in docs:
-                ts_str = doc.to_dict().get("timestamp", "")
-                if ts_str:
-                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                    return (datetime.now(timezone.utc) - ts).days
+            ts_str = (row or {}).get("timestamp") or ""
+            if ts_str:
+                ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                return (datetime.now(timezone.utc) - ts).days
             return 999
         except Exception as exc:
             logger.warning("days_since_last_message failed: %s", exc)

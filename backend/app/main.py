@@ -50,6 +50,7 @@ from app.services.agent_queue import AgentTaskQueue
 from app.services.telegram import NullTelegramBot, TelegramBot
 from app.services.mcp_client import DocumentStoreTokenStorage, McpIntegration
 from app.storage import get_store
+from app.storage.schema import Database
 
 # TODO: uncomment when voice input is enabled
 # from app.services.stt import STTService
@@ -111,8 +112,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _notion_service = None
         logger.info("Notion integration disabled (no token or database ids)")
 
-    # Document store: sqlite by default, Firestore when configured
+    # Document store: sqlite by default, Firestore when configured. Still used
+    # by the services that have not been converted to real tables yet.
     firestore_client = get_store(settings)
+
+    # The real database. Services move onto this one at a time; the two share
+    # the same file, so nothing is duplicated and there is no moment where the
+    # app is half-migrated.
+    database = Database(settings.sqlite_path)
 
     # Mem0
     mem0_client = _init_mem0(settings)
@@ -141,6 +148,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             firestore_client=firestore_client,
             telegram_bot=None,  # assigned after the bot is created
             genai_client=insights_genai,
+            database=database,
             collection_prefix=settings.firestore_collection_prefix,
             user_id=settings.user_id,
             model_id=settings.gemini_model,
@@ -153,6 +161,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         firestore_client=firestore_client,
         mem0_client=mem0_client,
         notion_service=_notion_service,
+        database=database,
         collection_prefix=settings.firestore_collection_prefix,
         user_id=settings.user_id,
         principle_service=principle_service,
@@ -296,6 +305,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             genai_client=insights_genai,
             agent=_agent,
             skill_manager=_tick_skill_manager,
+            database=database,
             collection_prefix=settings.firestore_collection_prefix,
             user_id=settings.user_id,
             config=_proactive_cfg,
@@ -601,6 +611,7 @@ def _log_startup_summary(settings: Settings) -> None:
         "",
         "  aileon is up",
         f"    storage      {backend}",
+        f"    tables       {_agent._memory.sql.journal_mode if _agent else '?'} journal",
         f"    model        {settings.gemini_model}",
         f"    notion       {'on' if settings.notion_enabled else 'off'}",
         f"    calendar     {'on' if _calendar_service else 'off'}",

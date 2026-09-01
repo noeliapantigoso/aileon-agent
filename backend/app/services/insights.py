@@ -123,8 +123,10 @@ class InsightService:
         calendar_service: Any = None,
         experiment_service: Any = None,
         notion_service: Any = None,
+        database: Any = None,
     ) -> None:
         self.db = firestore_client
+        self.sql = database
         self.telegram = telegram_bot
         self.genai = genai_client
         self._prefix = collection_prefix
@@ -675,20 +677,18 @@ class InsightService:
 
     def _aggregate_last_week(self) -> dict[str, Any]:
         """Aggregate metrics from the last 7 days of history."""
-        if self.db is None:
+        if self.sql is None:
             return {"total_messages": 0}
 
         cutoff = (datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)).isoformat()
 
         try:
-            from app.storage import Query
-            docs = (
-                self.db.collection(f"{self._prefix}_history")
-                .where("user_id", "==", self._user_id)
-                .where("timestamp", ">=", cutoff)
-                .stream()
+            # An equality plus an inequality, which is the shape Firestore
+            # demanded a composite index for and SQLite answers off one index.
+            interactions = self.sql.query(
+                "SELECT * FROM history WHERE user_id = ? AND timestamp >= ?",
+                (self._user_id, cutoff),
             )
-            interactions = [d.to_dict() for d in docs]
         except Exception as exc:
             logger.error("Failed to aggregate: %s", exc)
             return {"total_messages": 0}
@@ -708,13 +708,16 @@ class InsightService:
         by_weekday: dict[int, int] = defaultdict(int)
         tools_used = Counter()
 
+        # Rows come from a table now, so an unmeasured field is NULL rather than
+        # absent — `.get(name, default)` returns None and the default never
+        # fires. Every optional field below is read with `or` for that reason.
         for it in interactions:
             sent = it.get("sentiment")
             if sent:
                 sentiments[sent] += 1
-            for t in it.get("topics", []):
+            for t in it.get("topics") or []:
                 topics[t] += 1
-            for th in it.get("themes_mentioned", []):
+            for th in it.get("themes_mentioned") or []:
                 themes[th] += 1
             energy = it.get("energy_level")
             if energy:
@@ -727,7 +730,7 @@ class InsightService:
                 word_counts.append(wc)
             if it.get("is_action_commitment"):
                 commits += 1
-            ts_str = it.get("timestamp", "")
+            ts_str = it.get("timestamp") or ""
             if ts_str:
                 try:
                     ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
@@ -735,7 +738,7 @@ class InsightService:
                     by_weekday[ts.weekday()] += 1
                 except Exception:
                     pass
-            for a in it.get("actions", []):
+            for a in it.get("actions") or []:
                 tname = a.get("tool")
                 if tname:
                     tools_used[tname] += 1
