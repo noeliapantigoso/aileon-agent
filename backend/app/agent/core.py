@@ -137,7 +137,7 @@ class ProductivityAgent:
         # TelegramBot takes the agent in its constructor).
         self.telegram: Any = None
         self._skills = SkillManager(
-            firestore_client=memory_manager.db,
+            database=memory_manager.sql,
             collection_prefix=memory_manager._prefix,
         )
         self._skills.load_all()

@@ -49,7 +49,6 @@ class MemoryManager:
 
     def __init__(
         self,
-        firestore_client: Any,
         mem0_client: Any,
         notion_service: Any,
         database: Any = None,
@@ -61,7 +60,6 @@ class MemoryManager:
     ) -> None:
         # `db` is the document-store adapter, still handed to SkillManager.
         # `sql` is the real database; everything in this class uses it.
-        self.db = firestore_client
         self.sql = database
         self.mem0 = mem0_client
         self.notion = notion_service

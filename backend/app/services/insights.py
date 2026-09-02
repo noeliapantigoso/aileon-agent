@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 import re
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -113,7 +114,6 @@ class InsightService:
 
     def __init__(
         self,
-        firestore_client: Any,
         telegram_bot: Any,
         genai_client: Any,
         collection_prefix: str = "assistant",
@@ -125,7 +125,6 @@ class InsightService:
         notion_service: Any = None,
         database: Any = None,
     ) -> None:
-        self.db = firestore_client
         self.sql = database
         self.telegram = telegram_bot
         self.genai = genai_client
@@ -264,9 +263,10 @@ class InsightService:
         await self.memory.update_calibration(updates)
 
         # Record the change in the profile history
-        if self.db is not None:
+        if self.sql is not None:
             try:
-                self.db.collection(f"{self._prefix}_profile_history").add({
+                self.sql.insert("profile_history", {
+                    "id": uuid.uuid4().hex[:20],
                     "user_id": self._user_id,
                     "changed_at": datetime.now(timezone.utc).isoformat(),
                     "before": {"peak_hours": cur_peak, "low_energy_hours": cur_low},
@@ -275,7 +275,7 @@ class InsightService:
                     "sample_size_days": 30,
                     "reasoning": review.get("reasoning", ""),
                     "confidence": review.get("confidence", ""),
-                    "arithmetic_proposed": {
+                    "proposed": {
                         "peak_hours": new_peak, "low_energy_hours": new_low,
                     },
                 })
@@ -805,7 +805,7 @@ class InsightService:
         insight: dict[str, Any],
         stats: dict[str, Any],
     ) -> str | None:
-        if self.db is None:
+        if self.sql is None:
             return None
         try:
             doc = {
@@ -817,25 +817,22 @@ class InsightService:
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "based_on_messages": stats.get("total_messages", 0),
             }
-            _, ref = self.db.collection(f"{self._prefix}_insights").add(doc)
-            return ref.id
+            doc["id"] = uuid.uuid4().hex[:20]
+            self.sql.insert("insights", doc)
+            return doc["id"]
         except Exception as exc:
             logger.error("Failed to store insight: %s", exc)
             return None
 
     def _load_recent_insights(self, limit: int = 10) -> list[dict[str, Any]]:
-        if self.db is None:
+        if self.sql is None:
             return []
         try:
-            from app.storage import Query
-            docs = (
-                self.db.collection(f"{self._prefix}_insights")
-                .where("user_id", "==", self._user_id)
-                .order_by("created_at", direction=Query.DESCENDING)
-                .limit(limit)
-                .stream()
+            return self.sql.query(
+                "SELECT * FROM insights WHERE user_id = ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (self._user_id, limit),
             )
-            return [d.to_dict() for d in docs]
         except Exception as exc:
             logger.warning("Failed to load insights: %s", exc)
             return []

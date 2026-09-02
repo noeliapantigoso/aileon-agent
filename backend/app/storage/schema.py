@@ -188,7 +188,12 @@ CREATE TABLE IF NOT EXISTS profile_history (
     source           TEXT,    -- weekly_auto_tune | agent_edit | user_request
     sample_size_days INTEGER,
     before           TEXT,
-    after            TEXT
+    after            TEXT,
+    -- The tuner explains itself: what it concluded, how sure it was, and what
+    -- the arithmetic had proposed before the model reviewed it.
+    reasoning        TEXT,
+    confidence       TEXT,   -- high | medium | low
+    proposed         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_profile_history_user
     ON profile_history (user_id, changed_at DESC);
@@ -208,6 +213,28 @@ CREATE TABLE IF NOT EXISTS agent_queue (
 CREATE INDEX IF NOT EXISTS idx_agent_queue_due
     ON agent_queue (status, run_at);
 
+-- Skills the agent wrote for itself. The ones shipped in the image live as
+-- files under skills/ and are not stored here; on a name collision the stored
+-- one wins, which is what lets the agent revise a built-in without editing it.
+CREATE TABLE IF NOT EXISTS skills (
+    name       TEXT NOT NULL PRIMARY KEY,   -- slug
+    content    TEXT NOT NULL,
+    reason     TEXT,
+    created_at TEXT,
+    updated_at TEXT
+);
+
+-- OAuth state for MCP servers, one row per user and server. Holds refresh
+-- tokens, so it is the one table whose loss means going through consent again.
+CREATE TABLE IF NOT EXISTS mcp_auth (
+    user_id     TEXT NOT NULL,
+    server      TEXT NOT NULL,
+    tokens      TEXT,
+    client_info TEXT,
+    updated_at  TEXT,
+    PRIMARY KEY (user_id, server)
+);
+
 CREATE TABLE IF NOT EXISTS schema_meta (
     key   TEXT NOT NULL PRIMARY KEY,
     value TEXT NOT NULL
@@ -221,7 +248,8 @@ JSON_COLUMNS: dict[str, set[str]] = {
     "experiments": {"history"},
     "principles": {"applies_when", "personality_relevance"},
     "proactive_log": {"wakeups", "messages"},
-    "profile_history": {"before", "after"},
+    "profile_history": {"before", "after", "proposed"},
+    "mcp_auth": {"tokens", "client_info"},
 }
 
 _journal_warned: set[str] = set()
@@ -364,6 +392,24 @@ class Database:
             cur = self._conn.execute(sql, params)
             self._conn.commit()
             return cur.rowcount
+
+    def update(self, table: str, data: dict, where: dict) -> int:
+        """
+        Patch an existing row. Returns the number of rows changed.
+
+        Distinct from upsert on purpose. upsert attempts the INSERT first, and
+        SQLite checks NOT NULL before it ever reaches the conflict clause, so
+        patching two fields of an existing row fails on every required column
+        the patch does not mention. Use upsert for a whole row and this for a
+        change to one that is already there.
+        """
+        payload = _encode(data, table)
+        sets = ", ".join(f"{c} = ?" for c in payload)
+        conds = " AND ".join(f"{c} = ?" for c in where)
+        return self.execute(
+            f"UPDATE {table} SET {sets} WHERE {conds}",
+            tuple(payload.values()) + tuple(where.values()),
+        )
 
     def upsert(self, table: str, data: dict, keys: list[str]) -> None:
         """Insert a row, or update the one already holding those key columns."""

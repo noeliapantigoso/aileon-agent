@@ -93,15 +93,14 @@ class SkillManager:
 
     def __init__(
         self,
-        firestore_client: Any = None,
+        database: Any = None,
         collection_prefix: str = "assistant",
     ) -> None:
-        self._db = firestore_client
+        self.sql = database
         self._prefix = collection_prefix
         self._cache: list[dict[str, Any]] | None = None
 
-    def _collection(self):
-        return self._db.collection(f"{self._prefix}_skills")
+
 
     # ── Loading ───────────────────────────────────────────────────────────────
 
@@ -122,18 +121,16 @@ class SkillManager:
     def _load_custom(self) -> dict[str, dict[str, Any]]:
         """Load custom skills from Firestore."""
         skills: dict[str, dict[str, Any]] = {}
-        if self._db is None:
+        if self.sql is None:
             return skills
         try:
-            docs = self._collection().stream()
-            for doc in docs:
-                data = doc.to_dict() or {}
-                content = data.get("content", "")
+            for row in self.sql.query("SELECT * FROM skills"):
+                content = row.get("content") or ""
                 if content:
-                    skill = _skill_from_text(content, doc.id, source="custom")
+                    skill = _skill_from_text(content, row["name"], source="custom")
                     skills[skill["name"]] = skill
         except Exception as exc:
-            logger.warning("Failed to load custom skills from Firestore: %s", exc)
+            logger.warning("Failed to load custom skills: %s", exc)
         return skills
 
     def load_all(self) -> list[dict[str, Any]]:
@@ -166,22 +163,19 @@ class SkillManager:
         Returns the skill name/slug.
         """
         slug = _slugify(name)
-        if self._db is None:
-            raise RuntimeError("Firestore not available — cannot persist skill")
+        if self.sql is None:
+            raise RuntimeError("Database not available — cannot persist skill")
         now = datetime.now(timezone.utc).isoformat()
-        doc_ref = self._collection().document(slug)
-        existing = doc_ref.get()
+        existing = self.sql.query_one("SELECT name FROM skills WHERE name = ?", (slug,))
         payload = {
             "name": slug,
             "content": content,
             "reason": reason,
             "updated_at": now,
         }
-        if not existing.exists:
+        if existing is None:
             payload["created_at"] = now
-            doc_ref.set(payload)
-        else:
-            doc_ref.update(payload)
+        self.sql.upsert("skills", payload, keys=["name"])
         self.invalidate_cache()
         logger.info("Skill '%s' saved to Firestore. Reason: %s", slug, reason)
         return slug
@@ -193,23 +187,24 @@ class SkillManager:
         to override them with an empty or corrected version.
         Returns True if deleted, False if not found.
         """
-        if self._db is None:
+        if self.sql is None:
             raise RuntimeError("Firestore not available")
         slug = _slugify(name)
-        doc_ref = self._collection().document(slug)
-        if not doc_ref.get().exists:
+        if self.sql is None:
             return False
-        doc_ref.delete()
+        if not self.sql.query_one("SELECT name FROM skills WHERE name = ?", (slug,)):
+            return False
+        self.sql.execute("DELETE FROM skills WHERE name = ?", (slug,))
         self.invalidate_cache()
         logger.info("Skill '%s' deleted from Firestore", slug)
         return True
 
     def list_custom(self) -> list[str]:
         """Return names of all custom (Firestore) skills."""
-        if self._db is None:
+        if self.sql is None:
             return []
         try:
-            return [doc.id for doc in self._collection().stream()]
+            return [r["name"] for r in self.sql.query("SELECT name FROM skills")]
         except Exception:
             return []
 

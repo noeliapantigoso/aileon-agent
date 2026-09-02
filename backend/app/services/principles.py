@@ -30,8 +30,12 @@ def _normalize(text: str) -> str:
 class PrincipleService:
     """Loads and caches the principles stored in Firestore."""
 
-    def __init__(self, firestore_client: Any, collection_prefix: str = "assistant") -> None:
-        self.db = firestore_client
+    def __init__(
+        self,
+        collection_prefix: str = "assistant",
+        database: Any = None,
+    ) -> None:
+        self.sql = database
         self._prefix = collection_prefix
         self._cache: list[dict[str, Any]] = []
         self._cache_ts: float = 0.0
@@ -42,14 +46,15 @@ class PrincipleService:
         if self._cache and (now - self._cache_ts) < CACHE_TTL_SECONDS:
             return self._cache
 
-        if self.db is None:
+        if self.sql is None:
             return []
 
         try:
-            docs = self.db.collection(f"{self._prefix}_principles").stream()
-            self._cache = [doc.to_dict() for doc in docs]
+            # Shared knowledge, the same for every deployment, so there is no
+            # user to scope by.
+            self._cache = self.sql.query("SELECT * FROM principles")
             self._cache_ts = now
-            logger.info("Loaded %d principles from Firestore", len(self._cache))
+            logger.info("Loaded %d principles", len(self._cache))
         except Exception as exc:
             logger.error("Failed to load principles: %s", exc)
             return []

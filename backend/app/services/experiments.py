@@ -8,6 +8,7 @@ proactive cycle surfaces the ones whose check-in is overdue.
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -19,18 +20,16 @@ class ExperimentService:
 
     def __init__(
         self,
-        firestore_client: Any,
         collection_prefix: str = "assistant",
         user_id: str = "user",
+        database: Any = None,
     ) -> None:
-        self.db = firestore_client
+        self.sql = database
         self._prefix = collection_prefix
         self._user_id = user_id
 
-    def _collection(self):
-        if self.db is None:
-            return None
-        return self.db.collection(f"{self._prefix}_experiments")
+    def _available(self) -> bool:
+        return self.sql is not None
 
     # ── CRUD ────────────────────────────────────────────────────────────────
 
@@ -42,9 +41,8 @@ class ExperimentService:
         check_in_every_days: int = 3,
     ) -> dict[str, Any]:
         """Create a new experiment."""
-        col = self._collection()
-        if col is None:
-            return {"error": "Firestore unavailable"}
+        if not self._available():
+            return {"error": "database unavailable"}
 
         today = date.today()
         next_ci = today + timedelta(days=check_in_every_days)
@@ -64,9 +62,9 @@ class ExperimentService:
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        _, doc_ref = col.add(data)
-        data["id"] = doc_ref.id
-        logger.info("Experiment created: %s (id=%s)", name, doc_ref.id)
+        data["id"] = uuid.uuid4().hex[:20]
+        self.sql.insert("experiments", data)
+        logger.info("Experiment created: %s (id=%s)", name, data["id"])
         return data
 
     def log_progress(
@@ -76,17 +74,16 @@ class ExperimentService:
         did_it: bool = True,
     ) -> dict[str, Any]:
         """Append an entry to the experiment history."""
-        col = self._collection()
-        if col is None:
-            return {"error": "Firestore unavailable"}
+        if not self._available():
+            return {"error": "database unavailable"}
 
-        doc_ref = col.document(experiment_id)
-        doc = doc_ref.get()
-        if not doc.exists:
+        exp = self.sql.query_one(
+            "SELECT * FROM experiments WHERE id = ?", (experiment_id,)
+        )
+        if not exp:
             return {"error": f"Experiment {experiment_id} does not exist"}
 
-        exp = doc.to_dict()
-        history = exp.get("history", [])
+        history = exp.get("history") or []
         history.append({
             "date": date.today().isoformat(),
             "note": note,
@@ -98,10 +95,10 @@ class ExperimentService:
             date.today() + timedelta(days=exp.get("check_in_every_days", 3))
         ).isoformat()
 
-        doc_ref.update({
+        self.sql.update("experiments", {
             "history": history,
             "next_check_in": next_ci,
-        })
+        }, where={"id": experiment_id})
 
         return {
             "id": experiment_id,
@@ -117,42 +114,32 @@ class ExperimentService:
         status: str = "completed",
     ) -> dict[str, Any]:
         """Close an experiment with a final outcome."""
-        col = self._collection()
-        if col is None:
-            return {"error": "Firestore unavailable"}
+        if not self._available():
+            return {"error": "database unavailable"}
 
-        doc_ref = col.document(experiment_id)
-        doc = doc_ref.get()
-        if not doc.exists:
+        exp = self.sql.query_one(
+            "SELECT * FROM experiments WHERE id = ?", (experiment_id,)
+        )
+        if not exp:
             return {"error": f"Experiment {experiment_id} does not exist"}
 
-        doc_ref.update({
+        self.sql.update("experiments", {
             "status": status,
             "outcome": outcome,
             "closed_at": datetime.now(timezone.utc).isoformat(),
-        })
+        }, where={"id": experiment_id})
 
         return {"id": experiment_id, "status": status, "outcome": outcome}
 
     def list_active(self) -> list[dict[str, Any]]:
         """Return the user's active experiments."""
-        col = self._collection()
-        if col is None:
+        if not self._available():
             return []
-
         try:
-            docs = (
-                col
-                .where("user_id", "==", self._user_id)
-                .where("status", "==", "active")
-                .stream()
+            return self.sql.query(
+                "SELECT * FROM experiments WHERE user_id = ? AND status = 'active'",
+                (self._user_id,),
             )
-            results = []
-            for doc in docs:
-                d = doc.to_dict()
-                d["id"] = doc.id
-                results.append(d)
-            return results
         except Exception as exc:
             logger.error("list_active failed: %s", exc)
             return []
@@ -165,14 +152,14 @@ class ExperimentService:
         the pressure to propose a new one grow with time instead of depending on
         the agent remembering.
         """
-        col = self._collection()
-        if col is None:
+        if not self._available():
             return None
         try:
-            docs = col.where("user_id", "==", self._user_id).stream()
+            docs = self.sql.query(
+                "SELECT * FROM experiments WHERE user_id = ?", (self._user_id,)
+            )
             closes = []
-            for doc in docs:
-                d = doc.to_dict() or {}
+            for d in docs:
                 if d.get("status") == "active":
                     return None  # one is running
                 if d.get("closed_at"):

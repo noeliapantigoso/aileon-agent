@@ -48,8 +48,7 @@ from app.services.proactive import ProactiveService
 from app.services.tagging import TaggingService
 from app.services.agent_queue import AgentTaskQueue
 from app.services.telegram import NullTelegramBot, TelegramBot
-from app.services.mcp_client import DocumentStoreTokenStorage, McpIntegration
-from app.storage import get_store
+from app.services.mcp_client import DatabaseTokenStorage, McpIntegration
 from app.storage.schema import Database
 
 # TODO: uncomment when voice input is enabled
@@ -112,13 +111,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _notion_service = None
         logger.info("Notion integration disabled (no token or database ids)")
 
-    # Document store: sqlite by default, Firestore when configured. Still used
-    # by the services that have not been converted to real tables yet.
-    firestore_client = get_store(settings)
-
-    # The real database. Services move onto this one at a time; the two share
-    # the same file, so nothing is duplicated and there is no moment where the
-    # app is half-migrated.
+    # Everything the agent knows, in one SQLite file.
     database = Database(settings.sqlite_path)
 
     # Mem0
@@ -126,13 +119,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Principles
     principle_service = PrincipleService(
-        firestore_client=firestore_client,
+        database=database,
         collection_prefix=settings.firestore_collection_prefix,
     )
 
     # Experiments
     experiment_service = ExperimentService(
-        firestore_client=firestore_client,
+        database=database,
         collection_prefix=settings.firestore_collection_prefix,
         user_id=settings.user_id,
     )
@@ -145,7 +138,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     insight_service_local = None
     if insights_genai is not None:
         insight_service_local = InsightService(
-            firestore_client=firestore_client,
             telegram_bot=None,  # assigned after the bot is created
             genai_client=insights_genai,
             database=database,
@@ -158,7 +150,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Memory Manager
     _memory_manager = MemoryManager(
-        firestore_client=firestore_client,
         mem0_client=mem0_client,
         notion_service=_notion_service,
         database=database,
@@ -209,8 +200,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # One-time reminder queue
     global _agent_queue
     _agent_queue = AgentTaskQueue(
-        db=firestore_client,
+        database=database,
         collection_prefix=settings.firestore_collection_prefix,
+        user_id=settings.user_id,
     )
 
     # MCP servers — optional. Connecting is allowed to fail: an unreachable
@@ -221,10 +213,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         notion_mcp = McpIntegration(
             name="notion",
             url=settings.mcp_notion_url,
-            token_storage=DocumentStoreTokenStorage(
-                firestore_client,
-                f"{settings.firestore_collection_prefix}_mcp_auth",
-                f"{settings.user_id}_notion",
+            token_storage=DatabaseTokenStorage(
+                database, settings.user_id, "notion"
             ),
         )
         if await notion_mcp.connect():
@@ -280,7 +270,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Skill manager, shared by ProactiveService and TickHandler
     from app.agent.skill_manager import SkillManager
     _tick_skill_manager = SkillManager(
-        firestore_client=firestore_client,
+        database=database,
         collection_prefix=settings.firestore_collection_prefix,
     )
     _proactive_cfg: dict = {}
@@ -298,7 +288,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _insight_service = insight_service_local
 
         _proactive_service = ProactiveService(
-            firestore_client=firestore_client,
             experiment_service=experiment_service,
             notion_service=_notion_service,
             telegram_bot=_telegram_bot,

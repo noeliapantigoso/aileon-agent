@@ -10,8 +10,10 @@ second run overwrites with the same values rather than duplicating.
     python migrate_to_sqlite.py                    # write data/aileon.db
     python migrate_to_sqlite.py --dest /tmp/x.db   # somewhere else
 
-The resulting file is the whole agent's memory. Point SQLITE_PATH at it and set
-STORAGE_BACKEND=sqlite, and the agent carries on where it left off.
+Documents land in a staging table; migrate_to_tables.py then spreads them
+across the real ones. Two steps because the mapping from document to column
+belongs in one place, and that place is also what a file already in the old
+shape needs.
 """
 
 from __future__ import annotations
@@ -57,6 +59,38 @@ def _clean(value: Any, path: str = "") -> Any:
     raise TypeError(f"Unconvertible value at {path or '<root>'}: {type(value).__name__}")
 
 
+class _Staging:
+    """The `documents` table Firestore rows land in before being spread out."""
+
+    def __init__(self, path: str) -> None:
+        import sqlite3
+        self._conn = sqlite3.connect(path)
+        self._conn.executescript(
+            "CREATE TABLE IF NOT EXISTS documents ("
+            "  collection TEXT NOT NULL, doc_id TEXT NOT NULL, data TEXT NOT NULL,"
+            "  PRIMARY KEY (collection, doc_id));"
+        )
+        self._conn.commit()
+
+    def put(self, collection: str, doc_id: str, data: dict) -> None:
+        import json
+        self._conn.execute(
+            "INSERT INTO documents (collection, doc_id, data) VALUES (?, ?, ?) "
+            "ON CONFLICT(collection, doc_id) DO UPDATE SET data = excluded.data",
+            (collection, doc_id, json.dumps(data, ensure_ascii=False)),
+        )
+        self._conn.commit()
+
+    def count(self, collection: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM documents WHERE collection = ?", (collection,)
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def close(self) -> None:
+        self._conn.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", default="", help="GCP project (default: from settings)")
@@ -85,10 +119,15 @@ def main() -> int:
 
     source = firestore.Client(project=project)
 
+    # Firestore documents land in a staging table first, and migrate_to_tables.py
+    # then spreads them across the real ones. Two steps rather than one because
+    # the mapping from document to column belongs in a single place, and that
+    # place is also what a local file already in the old shape needs.
     dest_store = None
     if not args.dry_run:
-        from app.storage.sqlite_store import SqliteStore
-        dest_store = SqliteStore(dest)
+        import os
+        os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
+        dest_store = _Staging(dest)
 
     names = sorted(c.id for c in source.collections() if c.id.startswith(prefix))
     if not names:
@@ -121,7 +160,7 @@ def main() -> int:
                     subcollections.append(f"{name}/*/{sub.id}")
 
             if dest_store is not None:
-                dest_store.collection(name).document(doc.id).set(cleaned)
+                dest_store.put(name, doc.id, cleaned)
             count += 1
 
         counts[name] = count
@@ -150,17 +189,17 @@ def main() -> int:
         print("\n  verifying...", flush=True)
         bad = []
         for name in names:
-            written = len(list(dest_store.collection(name).stream()))
+            written = dest_store.count(name)
             if written != counts[name]:
                 bad.append(f"    {name}: copied {counts[name]}, readable {written}")
         if bad:
             print("  MISMATCH:", flush=True)
             print("\n".join(bad), flush=True)
             return 1
-        print(f"  ok — {total} documents readable from {dest}", flush=True)
-        print("\n  To use it:", flush=True)
-        print("    STORAGE_BACKEND=sqlite", flush=True)
-        print(f"    SQLITE_PATH={dest}", flush=True)
+        print(f"  ok — {total} documents staged in {dest}", flush=True)
+        print("\n  Now spread them across the real tables:", flush=True)
+        print(f"    python migrate_to_tables.py --path {dest}", flush=True)
+        dest_store.close()
 
     if skipped:
         return 1

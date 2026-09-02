@@ -276,31 +276,37 @@ async def _no_browser(url: str) -> None:
     )
 
 
-class DocumentStoreTokenStorage:
+class DatabaseTokenStorage:
     """
-    MCP's TokenStorage backed by the document store.
+    MCP's TokenStorage backed by the agent's database.
 
-    Tokens outlive the process and move with the rest of the data, so a
-    container restart does not send the user back through OAuth.
+    Tokens outlive the process, so a container restart does not send the user
+    back through consent.
     """
 
-    def __init__(self, db: Any, collection: str, doc_id: str) -> None:
+    def __init__(self, db: Any, user_id: str, server: str) -> None:
         self._db = db
-        self._collection = collection
-        self._doc_id = doc_id
-
-    def _doc(self):
-        return self._db.collection(self._collection).document(self._doc_id)
+        self._user_id = user_id
+        self._server = server
 
     def _read(self) -> dict:
         try:
-            return self._doc().get().to_dict() or {}
+            return self._db.query_one(
+                "SELECT * FROM mcp_auth WHERE user_id = ? AND server = ?",
+                (self._user_id, self._server),
+            ) or {}
         except Exception:
             return {}
 
     def _write(self, patch: dict) -> None:
+        from datetime import datetime, timezone
         try:
-            self._doc().set(patch, merge=True)
+            self._db.upsert("mcp_auth", {
+                "user_id": self._user_id,
+                "server": self._server,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                **patch,
+            }, keys=["user_id", "server"])
         except Exception as exc:
             logger.error("Could not persist MCP token: %s", exc)
 

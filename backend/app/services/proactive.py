@@ -52,7 +52,6 @@ class ProactiveService:
 
     def __init__(
         self,
-        firestore_client: Any,
         experiment_service: Any,
         notion_service: Any,
         telegram_bot: Any,
@@ -65,7 +64,6 @@ class ProactiveService:
         config: dict | None = None,
         database: Any = None,
     ) -> None:
-        self.db = firestore_client
         self.sql = database
         self.experiments = experiment_service
         self.notion = notion_service
@@ -475,12 +473,11 @@ The criteria for deciding — when it is worth writing, when it is not, and how 
 write an affirmation — live in the `proactive` skill already loaded above. Follow it.
 """
 
-    # ── State in Firestore ──────────────────────────────────────────────────
+    # ── State ───────────────────────────────────────────────────────────────
 
-    def _day_doc(self):
-        """One document per day: avoids composite queries (and their index)."""
-        doc_id = f"{self._user_id}_{date.today().isoformat()}"
-        return self.db.collection(f"{self._prefix}_proactive_log").document(doc_id)
+    def _day_row_id(self) -> str:
+        """One row per user per day, holding that day's wake-ups."""
+        return f"{self._user_id}_{date.today().isoformat()}"
 
     def _wakeups_today(self) -> list[dict[str, Any]]:
         """
@@ -490,13 +487,13 @@ write an affirmation — live in the `proactive` skill already loaded above. Fol
         from the conversation history on purpose: these are internal
         deliberations and have no business cluttering the user's chat.
         """
-        if self.db is None:
+        if self.sql is None:
             return []
         try:
-            doc = self._day_doc().get()
-            if not doc.exists:
-                return []
-            return (doc.to_dict() or {}).get("wakeups", [])
+            row = self.sql.query_one(
+                "SELECT wakeups FROM proactive_log WHERE id = ?", (self._day_row_id(),)
+            )
+            return (row or {}).get("wakeups") or []
         except Exception as exc:
             logger.warning("_wakeups_today failed: %s", exc)
             return []
@@ -509,7 +506,7 @@ write an affirmation — live in the `proactive` skill already loaded above. Fol
         self, hour: int, sent: bool, msg_type: str = "", reason: str = ""
     ) -> None:
         """Record this wake-up so the next one knows what was already considered."""
-        if self.db is None:
+        if self.sql is None:
             return
         try:
             entry = {
@@ -519,14 +516,13 @@ write an affirmation — live in the `proactive` skill already loaded above. Fol
                 "reason": reason[:300],
                 "at": datetime.now(timezone.utc).isoformat(),
             }
-            self._day_doc().set(
-                {
-                    "user_id": self._user_id,
-                    "date": date.today().isoformat(),
-                    "wakeups": self._wakeups_today() + [entry],
-                },
-                merge=True,
-            )
+            self.sql.upsert("proactive_log", {
+                "id": self._day_row_id(),
+                "user_id": self._user_id,
+                "date": date.today().isoformat(),
+                "type": "wakeups",
+                "wakeups": self._wakeups_today() + [entry],
+            }, keys=["id"])
         except Exception as exc:
             logger.warning("_log_wakeup failed: %s", exc)
 

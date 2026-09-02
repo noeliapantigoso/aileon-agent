@@ -54,21 +54,14 @@ class _CallbackHandler(BaseHTTPRequestHandler):
 async def main() -> int:
     sys.path.insert(0, ".")
     from app.config import get_settings
-    from app.services.mcp_client import DocumentStoreTokenStorage
-    from app.storage import get_store
+    from app.services.mcp_client import DatabaseTokenStorage
+    from app.storage.schema import Database
 
     settings = get_settings()
     url = settings.mcp_notion_url
 
-    store = get_store(settings)
-    if store is None:
-        print("No document store available — check STORAGE_BACKEND.")
-        return 1
-
-    storage = DocumentStoreTokenStorage(
-        store,
-        f"{settings.firestore_collection_prefix}_mcp_auth",
-        f"{settings.user_id}_notion",
+    storage = DatabaseTokenStorage(
+        Database(settings.sqlite_path), settings.user_id, "notion"
     )
 
     if await storage.get_tokens() is not None:
